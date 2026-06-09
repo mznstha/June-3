@@ -1,6 +1,6 @@
 export interface CitySEOPage {
   city: string;
-  state: "WA" | "NSW" | "VIC" | "QLD";
+  state: "WA" | "NSW" | "VIC" | "QLD" | "SA";
   postcodes: string[];
   suburbs: string[];
   topService: string;
@@ -165,5 +165,26 @@ export const PROGRAMMATIC_CITIES_METADATA: Record<string, CitySEOPage> = {
       "6210": 115.7225, "6211": 115.7533, "6180": 115.7610
     },
     neighboringCities: ["Perth", "Bunbury", "Rockingham"]
+  },
+  adelaide: {
+    city: "Adelaide",
+    state: "SA",
+    postcodes: ["5000", "5006", "5061", "5067", "5082"],
+    suburbs: ["Adelaide CBD", "North Adelaide", "Hyde Park", "Norwood", "Prospect"],
+    topService: "NDIS & Aged Care Compliant Sterilisation",
+    hourlyRate: 42,
+    totalCleanersCount: 18,
+    avgResponseMins: 14,
+    totalJobsDoneCount: 2940,
+    whsAct: "Work Health and Safety Act 2012 (SA)",
+    regulatoryAgency: "SafeWork SA",
+    localLandmarks: ["Adelaide Oval", "Rundle Mall", "Glenelg Beach", "Adelaide Botanic Garden", "Adelaide Central Market"],
+    postcodeLatitudes: {
+      "5000": -34.9285, "5006": -34.9045, "5061": -34.9515, "5067": -34.9215, "5082": -34.8855
+    },
+    postcodeLongitudes: {
+      "5000": 138.6007, "5006": 138.5975, "5061": 138.6055, "5067": 138.6365, "5082": 138.5915
+    },
+    neighboringCities: ["Barossa Valley", "Hahndorf", "Glenelg", "Port Adelaide"]
   }
 };

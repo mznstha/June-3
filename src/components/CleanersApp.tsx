@@ -49,7 +49,12 @@ import {
   savePhotoInDB,
   getPhotosFromDB,
   clearAllJobAssetsFromDB,
-  getOfflineDBSizeInBytes
+  getOfflineDBSizeInBytes,
+  saveTaskPhotoInDB,
+  getTaskPhotosFromDB,
+  getAllTaskPhotosForQuote,
+  openOfflineDB,
+  deletePhotoFromDB
 } from "../utils/indexedDb";
 
 interface CleanersAppProps {
@@ -153,6 +158,10 @@ export default function CleanersApp({
 
   // Custom states for advanced visual diagnostics, charts and team features
   const [checklistSearch, setChecklistSearch] = useState<Record<string, string>>({});
+
+  // Task-specific photos mapping: jobId -> { taskName: list of Base64 strings }
+  const [subtaskPhotos, setSubtaskPhotos] = useState<Record<string, Record<string, string[]>>>({});
+
   const [isTeamChatOpen, setIsTeamChatOpen] = useState(false);
   const [teamNotes, setTeamNotes] = useState<Array<{ id: string; sender: string; message: string; timestamp: string }>>(() => {
     try {
@@ -384,6 +393,25 @@ export default function CleanersApp({
 
   const [swStatus, setSwStatus] = useState<string>("detecting");
   const [projectedQuotes, setProjectedQuotes] = useState<QuoteRequest[]>(quotes);
+
+  // Pre-load all task-specific photos from IndexedDB for current jobs
+  useEffect(() => {
+    const loadAllTaskPhotos = async () => {
+      const photosMap: Record<string, Record<string, string[]>> = {};
+      for (const quote of projectedQuotes) {
+        try {
+          const taskPhotos = await getAllTaskPhotosForQuote(quote.id);
+          if (Object.keys(taskPhotos).length > 0) {
+            photosMap[quote.id] = taskPhotos;
+          }
+        } catch (err) {
+          console.warn(`Failed loading task photos for quote ${quote.id}:`, err);
+        }
+      }
+      setSubtaskPhotos(photosMap);
+    };
+    loadAllTaskPhotos();
+  }, [projectedQuotes]);
 
   // Sync History Log state for offline synchronization tracking
   const [syncHistory, setSyncHistory] = useState<any[]>(() => {
@@ -1229,6 +1257,117 @@ export default function CleanersApp({
     }
 
     setSigningJobId(null);
+  };
+
+  const handleTaskPhotoUpload = async (quoteId: string, taskName: string, e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    
+    const currentList = subtaskPhotos[quoteId]?.[taskName] || [];
+    if (currentList.length >= 5) {
+      alert("⚠️ Compliance Alert: Maximum of 5 audit evidence photos permitted per subtask checklist item.");
+      return;
+    }
+
+    onTriggerLog({
+      id: `task_compression_${Date.now()}`,
+      type: "system",
+      status: "warning",
+      message: `⚡ Task Photo Optimization: Initiating client-side quality scale & canvas compression on checklist item "${taskName.substring(0, 15)}..."`,
+      timestamp: new Date().toLocaleTimeString()
+    });
+
+    const file = files[0];
+    try {
+      const base64Raw = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (uploadEvent) => resolve(uploadEvent.target?.result as string);
+        reader.onerror = (err) => reject(err);
+        reader.readAsDataURL(file as Blob);
+      });
+
+      const compressed = await compressImageBase64(base64Raw, 800, 800, 0.7);
+      await saveTaskPhotoInDB(quoteId, taskName, compressed);
+
+      const updatedPhotos = await getAllTaskPhotosForQuote(quoteId);
+      setSubtaskPhotos(prev => ({
+        ...prev,
+        [quoteId]: updatedPhotos
+      }));
+
+      onTriggerLog({
+        id: `task_photo_success_${Date.now()}`,
+        type: "system",
+        status: "success",
+        message: `📸 Checklist Evidence: Added 1 compressed photo specifically for task "${taskName}" on Job #${quoteId.slice(-6)}. Total: ${updatedPhotos[taskName]?.length || 1}/5.`,
+        timestamp: new Date().toLocaleTimeString()
+      });
+
+      await queryIdbStats();
+
+    } catch (err) {
+      console.error("Subtask photo processing failure:", err);
+      onTriggerLog({
+        id: `task_photo_error_${Date.now()}`,
+        type: "system",
+        status: "danger",
+        message: `⚠️ Subtask Evidence Error: Failed to compress or store photo for task "${taskName}". Details: ${err}`,
+        timestamp: new Date().toLocaleTimeString()
+      });
+    }
+  };
+
+  const handleTaskPhotoDelete = async (quoteId: string, taskName: string, photoIndex: number) => {
+    try {
+      const db = await openOfflineDB();
+      const transaction = db.transaction("photos", "readwrite");
+      const store = transaction.objectStore("photos");
+      
+      let matchedCount = 0;
+      let targetId = "";
+      
+      const request = store.openCursor();
+      await new Promise<void>((resolve, reject) => {
+        request.onsuccess = (event) => {
+          const cursor = (event.target as IDBRequest<IDBCursorWithValue | null>).result;
+          if (cursor) {
+            const value = cursor.value;
+            if (value.quoteId === quoteId && value.type === `task_${taskName}`) {
+              if (matchedCount === photoIndex) {
+                 targetId = value.id;
+              }
+              matchedCount++;
+            }
+            cursor.continue();
+          } else {
+            resolve();
+          }
+        };
+        request.onerror = (e) => reject((e.target as IDBRequest).error);
+      });
+
+      if (targetId) {
+        await deletePhotoFromDB(targetId);
+        
+        const updatedPhotos = await getAllTaskPhotosForQuote(quoteId);
+        setSubtaskPhotos(prev => ({
+          ...prev,
+          [quoteId]: updatedPhotos
+        }));
+
+        onTriggerLog({
+          id: `task_photo_delete_${Date.now()}`,
+          type: "system",
+          status: "info",
+          message: `🗑️ Checklist Evidence Removed: Deleted evidence photo for subtask "${taskName}" index #${photoIndex} on Job #${quoteId.slice(-6)}.`,
+          timestamp: new Date().toLocaleTimeString()
+        });
+
+        await queryIdbStats();
+      }
+    } catch (err) {
+      console.warn("Subtask photo deletion failure:", err);
+    }
   };
 
   const handlePhotoUpload = async (quoteId: string, type: "before" | "after", e: React.ChangeEvent<HTMLInputElement>) => {
@@ -3095,26 +3234,83 @@ export default function CleanersApp({
                               }
                               return filtered.map((task, idx) => {
                                 const isChecked = completedTasks.includes(task);
+                                const taskPics = subtaskPhotos[job.id]?.[task] || [];
                                 return (
                                   <div 
                                     key={idx} 
-                                    onClick={() => handleToggleSubtask(job.id, task)}
-                                    className={`flex items-start gap-3 py-2.5 cursor-pointer transition-all px-1`}
+                                    className={`py-3 px-1.5 border-b ${
+                                      daylightHighContrast ? "border-zinc-200" : "border-slate-850"
+                                    } last:border-0 transition-all`}
                                   >
-                                    <div className={`w-4 h-4 rounded mt-0.5 flex items-center justify-center shrink-0 border transition-all ${
-                                      isChecked 
-                                        ? (daylightHighContrast ? "bg-black border-black text-white" : "bg-emerald-500 border-emerald-500 text-white") 
-                                        : (daylightHighContrast ? "border-black hover:bg-black/10" : "border-slate-700 hover:border-purple-500")
-                                    }`}>
-                                      {isChecked && <CheckCircle2 className={`w-3.5 h-3.5 text-white ${daylightHighContrast ? "fill-black" : "fill-emerald-500"} stroke-[5]`} />}
+                                    <div className="flex items-start justify-between gap-4">
+                                      {/* Left completion toggle clickable zone */}
+                                      <div 
+                                        onClick={() => handleToggleSubtask(job.id, task)}
+                                        className="flex items-start gap-3 flex-1 cursor-pointer select-none"
+                                      >
+                                        <div className={`w-4 h-4 rounded mt-0.5 flex items-center justify-center shrink-0 border transition-all ${
+                                          isChecked 
+                                            ? (daylightHighContrast ? "bg-black border-black text-white" : "bg-emerald-500 border-emerald-500 text-white") 
+                                            : (daylightHighContrast ? "border-black hover:bg-black/10" : "border-slate-700 hover:border-purple-500")
+                                        }`}>
+                                          {isChecked && <CheckCircle2 className={`w-3.5 h-3.5 text-white ${daylightHighContrast ? "fill-black" : "fill-emerald-500"} stroke-[5]`} />}
+                                        </div>
+                                        
+                                        <div className="space-y-1">
+                                          <span className={`text-[11px] leading-tight font-sans font-bold block ${
+                                            isChecked 
+                                              ? "line-through text-slate-500" 
+                                              : (daylightHighContrast ? "text-black font-black" : "text-slate-300")
+                                          }`}>
+                                            {task}
+                                          </span>
+                                          
+                                          {/* Task specific Evidence Photos Inline Gallery */}
+                                          {taskPics.length > 0 && (
+                                            <div className="flex flex-wrap gap-1.5 pt-1.5" onClick={(ev) => ev.stopPropagation()}>
+                                              {taskPics.map((pic, pIdx) => (
+                                                <div 
+                                                  key={pIdx} 
+                                                  className="relative group w-8 h-8 rounded-lg overflow-hidden border border-slate-700/40 shadow-xs bg-slate-900 shrink-0"
+                                                >
+                                                  <img src={pic} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => handleTaskPhotoDelete(job.id, task, pIdx)}
+                                                    className="absolute inset-0 bg-red-600/80 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
+                                                    title="Delete this evidence photo"
+                                                  >
+                                                    <X className="w-2.5 h-2.5 stroke-[3]" />
+                                                  </button>
+                                                </div>
+                                              ))}
+                                            </div>
+                                          )}
+                                        </div>
+                                      </div>
+
+                                      {/* Right Action zone - Photo uploader */}
+                                      <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
+                                        <input 
+                                          type="file" 
+                                          accept="image/*" 
+                                          id={`task-upload-${job.id}-${idx}`}
+                                          className="hidden" 
+                                          onChange={(e) => handleTaskPhotoUpload(job.id, task, e)}
+                                        />
+                                        <label 
+                                          htmlFor={`task-upload-${job.id}-${idx}`}
+                                          title="Add task-specific evidence photograph"
+                                          className={`p-1.5 rounded-lg border flex items-center justify-center hover:scale-105 active:scale-95 transition-all cursor-pointer ${
+                                            daylightHighContrast
+                                              ? "bg-zinc-100 hover:bg-black hover:text-white border-zinc-300 text-black shadow-xs"
+                                              : "bg-slate-900/60 hover:bg-indigo-650/85 border-slate-750 text-indigo-400 hover:text-white shadow"
+                                          }`}
+                                        >
+                                          <Plus className="w-3.5 h-3.5" />
+                                        </label>
+                                      </div>
                                     </div>
-                                    <span className={`text-[11px] leading-tight select-none font-sans font-bold ${
-                                      isChecked 
-                                        ? "line-through text-slate-500" 
-                                        : (daylightHighContrast ? "text-black font-black" : "text-slate-300")
-                                    }`}>
-                                      {task}
-                                    </span>
                                   </div>
                                 );
                               });

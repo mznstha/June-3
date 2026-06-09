@@ -292,3 +292,112 @@ export async function getOfflineDBSizeInBytes(): Promise<{ signatures: number; p
     return { signatures: 0, photos: 0, total: 0 };
   }
 }
+
+/**
+ * Store a task-specific (subtask) evidence photograph
+ */
+export async function saveTaskPhotoInDB(quoteId: string, taskName: string, dataUrl: string): Promise<string> {
+  const db = await openOfflineDB();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction("photos", "readwrite");
+    const store = transaction.objectStore("photos");
+
+    const id = `taskphoto_${quoteId}_${encodeURIComponent(taskName)}_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+    const record = {
+      id,
+      quoteId,
+      type: `task_${taskName}`,
+      dataUrl,
+      createdAt: new Date().toISOString()
+    };
+
+    const request = store.put(record);
+
+    request.onsuccess = () => {
+      console.log(`💾 IndexedDB subtask photo stored for Quote #${quoteId.slice(-6)} [${taskName}]`);
+      resolve(id);
+    };
+
+    request.onerror = (event) => {
+      reject((event.target as IDBRequest).error);
+    };
+  });
+}
+
+/**
+ * Get all task-specific photos from DB
+ */
+export async function getTaskPhotosFromDB(quoteId: string, taskName: string): Promise<string[]> {
+  try {
+    const db = await openOfflineDB();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction("photos", "readonly");
+      const store = transaction.objectStore("photos");
+      
+      const photos: string[] = [];
+      const request = store.openCursor();
+
+      request.onsuccess = (event) => {
+        const cursor = (event.target as IDBRequest<IDBCursorWithValue | null>).result;
+        if (cursor) {
+          const value = cursor.value;
+          if (value.quoteId === quoteId && value.type === `task_${taskName}`) {
+            photos.push(value.dataUrl);
+          }
+          cursor.continue();
+        } else {
+          resolve(photos);
+        }
+      };
+
+      request.onerror = (event) => {
+        reject((event.target as IDBRequest).error);
+      };
+    });
+  } catch (err) {
+    console.error("Failed fetching task-specific photos list from indexedDB", err);
+    return [];
+  }
+}
+
+/**
+ * Get all task-specific photos for a specific quote
+ */
+export async function getAllTaskPhotosForQuote(quoteId: string): Promise<Record<string, string[]>> {
+  try {
+    const db = await openOfflineDB();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction("photos", "readonly");
+      const store = transaction.objectStore("photos");
+      
+      const map: Record<string, string[]> = {};
+      const request = store.openCursor();
+
+      request.onsuccess = (event) => {
+        const cursor = (event.target as IDBRequest<IDBCursorWithValue | null>).result;
+        if (cursor) {
+          const value = cursor.value;
+          if (value.quoteId === quoteId && value.type && value.type.startsWith("task_")) {
+            const taskName = value.type.substring(5); // remove 'task_' prefix
+            if (!map[taskName]) {
+              map[taskName] = [];
+            }
+            map[taskName].push(value.dataUrl);
+          }
+          cursor.continue();
+        } else {
+          resolve(map);
+        }
+      };
+
+      request.onerror = (event) => {
+        reject((event.target as IDBRequest).error);
+      };
+    });
+  } catch (err) {
+    console.error("Failed fetching all task photos matching quoteId from indexedDB", err);
+    return {};
+  }
+}
+
+

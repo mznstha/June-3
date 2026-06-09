@@ -19,6 +19,7 @@ import PricingCalculator from "./components/PricingCalculator";
 import CustomerDashboard from "./components/CustomerDashboard";
 import HermesChatwootWidget from "./components/HermesChatwootWidget";
 import ProgrammaticLandingPage from "./components/ProgrammaticLandingPage";
+import CityBranchHub from "./components/CityBranchHub";
 
 import { QuoteRequest, ConnectionLog, WebhookConfig, Cleaner, ServiceItem, StateCoverage, PostcodeCoverage } from "./types";
 import { defaultWebhookConfig, allServices } from "./data";
@@ -188,7 +189,7 @@ export default function App() {
   const [logs, setLogs] = useState<ConnectionLog[]>([]);
   const [quotes, setQuotes] = useState<QuoteRequest[]>(INITIAL_QUOTES);
   const [cleaners, setCleaners] = useState<Cleaner[]>(DEFAULT_CLEANERS);
-  const [currentView, setCurrentView] = useState<"client" | "admin" | "cleaner" | "seo" | "developer" | "services" | "pricing" | "dashboard">("client");
+  const [currentView, setCurrentView] = useState<"client" | "admin" | "cleaner" | "seo" | "developer" | "services" | "pricing" | "dashboard" | "city-hub">("client");
 
   // Local state for tracking the webhook parameter settings
   const [webhookConfig, setWebhookConfig] = useState<WebhookConfig>(defaultWebhookConfig);
@@ -355,7 +356,7 @@ export default function App() {
     }
   };
 
-  const handleViewChange = (view: "client" | "admin" | "cleaner" | "seo" | "developer" | "services" | "pricing" | "dashboard") => {
+  const handleViewChange = (view: "client" | "admin" | "cleaner" | "seo" | "developer" | "services" | "pricing" | "dashboard" | "city-hub") => {
     setCurrentView(view);
     if (view === "developer") {
       setIsDevMode(true);
@@ -573,6 +574,12 @@ export default function App() {
           onTriggerLog={addLog}
           onUpdateQuote={handleUpdateQuote}
           onChangeView={handleViewChange}
+        />
+      ) : currentView === "city-hub" ? (
+        <CityBranchHub
+          quotes={quotes}
+          onOpenQuote={handleOpenQuote}
+          onTriggerLog={addLog}
         />
       ) : (
         <>

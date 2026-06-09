@@ -5,8 +5,8 @@ interface NavbarProps {
   onOpenQuote: (service?: string) => void;
   isDevMode: boolean;
   onToggleDevMode: () => void;
-  currentView: "client" | "admin" | "cleaner" | "seo" | "developer" | "services" | "pricing" | "dashboard";
-  onChangeView: (view: "client" | "admin" | "cleaner" | "seo" | "developer" | "services" | "pricing" | "dashboard") => void;
+  currentView: "client" | "admin" | "cleaner" | "seo" | "developer" | "services" | "pricing" | "dashboard" | "city-hub";
+  onChangeView: (view: "client" | "admin" | "cleaner" | "seo" | "developer" | "services" | "pricing" | "dashboard" | "city-hub") => void;
 }
 
 export default function Navbar({ 
@@ -71,6 +71,12 @@ export default function Navbar({
               Services Directory
             </button>
             <button 
+              onClick={() => onChangeView("city-hub")} 
+              className={`hover:text-purple-700 transition-colors py-1 cursor-pointer font-bold ${currentView === "city-hub" ? "text-purple-700 border-b-2 border-purple-700" : "text-slate-650"}`}
+            >
+              City Branch Hub
+            </button>
+            <button 
               onClick={() => onChangeView("pricing")} 
               className={`hover:text-purple-700 transition-colors py-1 cursor-pointer font-bold ${currentView === "pricing" ? "text-purple-700 border-b-2 border-purple-700" : "text-slate-650"}`}
             >
@@ -109,6 +115,7 @@ export default function Navbar({
               className="bg-transparent border-0 text-indigo-400 font-black text-xs outline-none cursor-pointer pr-1"
             >
               <option value="client" className="bg-slate-900 text-slate-100 font-bold">🌐 Client Site</option>
+              <option value="city-hub" className="bg-slate-900 text-slate-100 font-bold">🌆 City Branch Hub</option>
               <option value="dashboard" className="bg-slate-900 text-slate-100 font-bold">📲 Customer Dashboard</option>
               <option value="services" className="bg-slate-900 text-slate-100 font-bold">📋 Services Directory</option>
               <option value="pricing" className="bg-slate-900 text-slate-100 font-bold">💰 Pricing Estimator</option>
