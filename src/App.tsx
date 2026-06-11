@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { ThemeProvider, useTheme } from "./context/ThemeContext";
 import Navbar from "./components/Navbar";
 import Hero from "./components/Hero";
 import BentoServices from "./components/BentoServices";
@@ -81,6 +82,14 @@ const INITIAL_QUOTES: QuoteRequest[] = [
 ];
 
 export default function App() {
+  return (
+    <ThemeProvider>
+      <AppContent />
+    </ThemeProvider>
+  );
+}
+
+function AppContent() {
   // Modal & Service Selection State
   const [isQuoteOpen, setIsQuoteOpen] = useState(false);
   const [selectedService, setSelectedService] = useState("");
@@ -254,7 +263,7 @@ export default function App() {
   };
 
   // Trigger when a quote gets successfully requested inside the modal
-  const handleQuoteSubmit = (newQuote: QuoteRequest) => {
+  const handleQuoteSubmit = async (newQuote: QuoteRequest) => {
     setQuotes((prev) => [...prev, newQuote]);
 
     // 1. Log to developers console
@@ -266,7 +275,148 @@ export default function App() {
       timestamp: new Date().toLocaleTimeString(),
     });
 
-    // 2. Simulate high-end Webhook post dynamic action
+    const mapServiceNameToSlug = (name: string): string => {
+      const slugMap: Record<string, string> = {
+        "Regular Cleaning": "regular-cleaning",
+        "End of Lease Cleaning": "end-of-lease",
+        "End-of-Lease Cleaning": "end-of-lease",
+        "Commercial Cleaning": "commercial-cleaning",
+        "Office Cleaning": "office-cleaning",
+        "Carpet Cleaning": "carpet-cleaning",
+        "NDIS Cleaning": "ndis-cleaning",
+      };
+      return slugMap[name] || "regular-cleaning";
+    };
+
+    // 2. Transmit to standard gateway API endpoint
+    try {
+      const slug = mapServiceNameToSlug(newQuote.serviceName);
+      const res = await fetch("/api/v1/quote", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          serviceId: slug,
+          inputData: {
+            name: newQuote.name,
+            email: newQuote.email,
+            phone: newQuote.phone,
+            postcode: newQuote.postcode,
+            notes: newQuote.notes,
+            estimatedTotal: newQuote.estimatedTotal
+          }
+        })
+      });
+      if (res.ok) {
+        const body = await res.json();
+        addLog({
+          id: `gateway_success_${Date.now()}`,
+          type: "system",
+          status: "success",
+          message: `🟢 Enterprise API Gateway: Verified price formula ($${body.calculatedPrice}) and secured transaction!`,
+          timestamp: new Date().toLocaleTimeString(),
+          payload: body
+        });
+      }
+    } catch (e: any) {
+      addLog({
+        id: `gateway_err_${Date.now()}`,
+        type: "system",
+        status: "error",
+        message: `⚠️ Enterprise API Gateway trace failed: ${e.message}`,
+        timestamp: new Date().toLocaleTimeString()
+      });
+    }
+
+    // 3. Sync live contact lead data to Payload CMS
+    try {
+      const res = await fetch("/api/integrations/payload", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: newQuote.id,
+          name: newQuote.name,
+          email: newQuote.email,
+          phone: newQuote.phone,
+          postcode: newQuote.postcode,
+          notes: newQuote.notes,
+          estimatedTotal: newQuote.estimatedTotal
+        })
+      });
+      if (res.ok) {
+        const body = await res.json();
+        addLog({
+          id: `payload_sync_ok_${Date.now()}`,
+          type: "crm",
+          status: "success",
+          message: `📊 Payload CMS Handshake: Lead persisted in collection "leads" dynamically!`,
+          timestamp: new Date().toLocaleTimeString(),
+          payload: body
+        });
+      }
+    } catch (e: any) {
+      addLog({
+        id: `payload_sync_err_${Date.now()}`,
+        type: "crm",
+        status: "error",
+        message: `⚠️ Payload CMS Handshake failed: ${e.message}`,
+        timestamp: new Date().toLocaleTimeString()
+      });
+    }
+
+    // 4. Sync live contact lead data to Twenty CRM pipeline
+    try {
+      const res = await fetch("/api/v1/twenty/sync-lead", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          clientName: newQuote.name,
+          email: newQuote.email,
+          phone: newQuote.phone,
+          serviceName: newQuote.serviceName,
+          estimatedTotal: newQuote.estimatedTotal,
+          postcode: newQuote.postcode
+        })
+      });
+      if (res.ok) {
+        const body = await res.json();
+        addLog({
+          id: `twenty_sync_ok_${Date.now()}`,
+          type: "crm",
+          status: "success",
+          message: `🚀 Twenty CRM Pipeline: Registered contact (ID: ${body.personId}) & Opportunity (ID: ${body.opportunityId}) under Incoming Stage!`,
+          timestamp: new Date().toLocaleTimeString(),
+          payload: body
+        });
+      }
+    } catch (e: any) {
+      addLog({
+        id: `twenty_sync_err_${Date.now()}`,
+        type: "crm",
+        status: "error",
+        message: `⚠️ Twenty CRM synchronization failed: ${e.message}`,
+        timestamp: new Date().toLocaleTimeString()
+      });
+    }
+
+    // 5. Query Chatwoot contact summary / contextual feed
+    try {
+      const res = await fetch(`/api/v1/chatwoot/agent/context?email=${encodeURIComponent(newQuote.email)}&phone=${encodeURIComponent(newQuote.phone)}`);
+      if (res.ok) {
+        const body = await res.json();
+        addLog({
+          id: `chatwoot_ctx_ok_${Date.now()}`,
+          type: "api",
+          status: "info",
+          message: `💬 Chatwoot Contact Resolution: Loaded historical context (${body.activeIncidentMetrics.totalQuotesRequested} quotes found)`,
+          timestamp: new Date().toLocaleTimeString(),
+          payload: body
+        });
+      }
+    } catch (e: any) {
+      console.warn("Chatwoot context fetch warning:", e);
+    }
+
+    // 6. Simulate high-end Webhook post dynamic action
     if (webhookConfig.isActive && webhookConfig.triggerOnQuote) {
       triggerSimulatedWebhook({
         event: "QUOTE_CREATED",

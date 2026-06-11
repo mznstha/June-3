@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { Phone, Send, Code, ShieldCheck, HelpCircle, Sparkles } from "lucide-react";
+import { Phone, Send, Code, ShieldCheck, HelpCircle, Sparkles, Sun, Moon } from "lucide-react";
+import { useTheme } from "../context/ThemeContext";
 
 interface NavbarProps {
   onOpenQuote: (service?: string) => void;
@@ -17,6 +18,7 @@ export default function Navbar({
   onChangeView
 }: NavbarProps) {
   const [scrolled, setScrolled] = useState(false);
+  const { daylightHighContrast, setDaylightHighContrast } = useTheme();
 
   // Monitor scrolling to add backdrop blur
   if (typeof window !== "undefined") {
@@ -144,6 +146,30 @@ export default function Navbar({
               <span className="hidden md:inline">
                 {isDevMode ? "Exit Dev Console" : "CRM / API Hub"}
               </span>
+            </button>
+
+            {/* Global Theme Mode Toggle */}
+            <button
+              onClick={() => setDaylightHighContrast(!daylightHighContrast)}
+              id="global-theme-toggle"
+              className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-bold uppercase tracking-wider transition-all border cursor-pointer ${
+                daylightHighContrast
+                  ? "bg-amber-50 border-amber-200 text-amber-700 hover:bg-amber-100/50"
+                  : "bg-slate-900 border-slate-800 text-indigo-400 hover:bg-slate-800"
+              }`}
+              title={daylightHighContrast ? "Switch to Full Dark Mode" : "Switch to Daylight High Contrast Mode"}
+            >
+              {daylightHighContrast ? (
+                <>
+                  <Sun className="w-4 h-4 text-amber-500" />
+                  <span className="hidden sm:inline">Daylight Mode</span>
+                </>
+              ) : (
+                <>
+                  <Moon className="w-4 h-4 text-indigo-400" />
+                  <span className="hidden sm:inline">Dark Mode</span>
+                </>
+              )}
             </button>
 
             {/* Direct Phone Call */}

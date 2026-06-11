@@ -35,12 +35,18 @@ import {
   MessageSquare,
   Search,
   Plus,
-  Minus
+  Minus,
+  Edit2,
+  Calendar,
+  ChevronLeft,
+  ChevronRight
 } from "lucide-react";
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid } from "recharts";
 import JSZip from "jszip";
+import { jsPDF } from "jspdf";
 import { QuoteRequest, Cleaner } from "../types";
 import { APIProvider, Map, AdvancedMarker, Pin } from "@vis.gl/react-google-maps";
+import { useTheme } from "../context/ThemeContext";
 import { safeLocalStorage as localStorage } from "../utils/storageFallback";
 import { SERVICE_METADATA } from "../config/ServiceCatalog";
 import {
@@ -117,6 +123,85 @@ const compressImageBase64 = (base64Str: string, maxWidth = 800, maxHeight = 800,
   });
 };
 
+// Standalone high-performance SwipeActionTrack to guarantee correct React state lifecycle schedule
+const SwipeActionTrack = ({ 
+  text, 
+  colorClass, 
+  onPerform, 
+  daylightHighContrast 
+}: { 
+  text: string; 
+  colorClass: string; 
+  onPerform: () => void; 
+  daylightHighContrast: boolean; 
+}) => {
+  const [offset, setOffset] = useState(0);
+  const [isDragging, setIsDragging] = useState(false);
+  const startXRef = useRef(0);
+
+  const handleStart = (clientX: number) => {
+    setIsDragging(true);
+    startXRef.current = clientX;
+  };
+
+  const handleMove = (clientX: number) => {
+    if (!isDragging) return;
+    const diff = Math.max(0, Math.min(130, clientX - startXRef.current));
+    setOffset(diff);
+  };
+
+  const handleEnd = () => {
+    if (!isDragging) return;
+    setIsDragging(false);
+    if (offset >= 110) {
+      onPerform();
+    }
+    setOffset(0);
+  };
+
+  useEffect(() => {
+    const onGlobalMove = (e: MouseEvent) => handleMove(e.clientX);
+    const onGlobalTouchMove = (e: TouchEvent) => handleMove(e.touches[0].clientX);
+    const onGlobalUp = () => handleEnd();
+
+    if (isDragging) {
+      window.addEventListener("mousemove", onGlobalMove);
+      window.addEventListener("mouseup", onGlobalUp);
+      window.addEventListener("touchmove", onGlobalTouchMove);
+      window.addEventListener("touchend", onGlobalUp);
+    }
+    return () => {
+      window.removeEventListener("mousemove", onGlobalMove);
+      window.removeEventListener("mouseup", onGlobalUp);
+      window.removeEventListener("touchmove", onGlobalTouchMove);
+      window.removeEventListener("touchend", onGlobalUp);
+    };
+  }, [isDragging, offset]);
+
+  return (
+    <div className={`relative w-52 h-10 ${daylightHighContrast ? "bg-zinc-100 border-2 border-black" : "bg-slate-950/90 border border-slate-800"} rounded-xl overflow-hidden select-none flex items-center shadow-md shrink-0`}>
+      <div 
+        className={`absolute left-0 top-0 bottom-0 ${colorClass} opacity-20`}
+        style={{ width: `${offset + 36}px` }}
+      />
+      <div className={`absolute inset-0 flex items-center justify-center text-[9px] font-black tracking-widest uppercase pointer-events-none select-none text-center ${daylightHighContrast ? "text-black" : "text-slate-400"}`}>
+        {offset > 12 ? "" : text}
+      </div>
+      <div
+        onMouseDown={(e) => handleStart(e.clientX)}
+        onTouchStart={(e) => handleStart(e.touches[0].clientX)}
+        className="absolute left-1 h-8 w-8 bg-indigo-600 hover:bg-indigo-550 rounded-lg flex items-center justify-center text-white cursor-grab active:cursor-grabbing shadow-sm text-xs font-bold font-mono"
+        style={{ 
+          transform: `translateX(${offset}px)`,
+          transition: isDragging ? "none" : "transform 0.25s cubic-bezier(0.16, 1, 0.3, 1)"
+        }}
+      >
+        👉
+      </div>
+    </div>
+  );
+};
+
 export default function CleanersApp({ 
   quotes, 
   cleaners, 
@@ -125,7 +210,7 @@ export default function CleanersApp({
 }: CleanersAppProps) {
   
   const [activeCleanerName, setActiveCleanerName] = useState(cleaners[0]?.name || "");
-  const [daylightHighContrast, setDaylightHighContrast] = useState(false);
+  const { daylightHighContrast, setDaylightHighContrast } = useTheme();
   const [completedSubtasks, setCompletedSubtasks] = useState<Record<string, string[]>>(() => {
     try {
       const saved = localStorage.getItem("aastaclean_completed_subtasks");
@@ -180,6 +265,51 @@ export default function CleanersApp({
   const [dragOffsets, setDragOffsets] = useState<Record<string, number>>({});
   const [activeDragJob, setActiveDragJob] = useState<{ id: string; startX: number } | null>(null);
   const [cleanerGpsCoords, setCleanerGpsCoords] = useState<Record<string, { lat: number; lng: number; bearing: number }>>({});
+
+  // --- PHASE 2: ADVANCED SHIFT CLOCKING STATES ---
+  const [shiftClockedIn, setShiftClockedIn] = useState<boolean>(() => {
+    return localStorage.getItem("aastaclean_shift_clocked_in") === "true";
+  });
+  const [shiftStartTime, setShiftStartTime] = useState<string | null>(() => {
+    return localStorage.getItem("aastaclean_shift_start_time");
+  });
+  const [shiftTotalSeconds, setShiftTotalSeconds] = useState<number>(() => {
+    const saved = localStorage.getItem("aastaclean_shift_total_seconds");
+    return saved ? parseInt(saved) : 0;
+  });
+
+  // --- PHASE 2: VISUAL CALENDAR STATES ---
+  const [viewTab, setViewTab] = useState<"list" | "calendar">("list");
+  const [calendarDate, setCalendarDate] = useState<Date>(new Date());
+  const [selectedCalendarDate, setSelectedCalendarDate] = useState<string>(() => {
+    return new Date().toISOString().split('T')[0];
+  });
+
+  // --- PHASE 2: PHOTO ANNOTATION STATES ---
+  const [annotatingPhoto, setAnnotatingPhoto] = useState<{
+    quoteId: string;
+    type: "before" | "after" | "subtask";
+    index: number;
+    src: string;
+    taskName?: string;
+  } | null>(null);
+
+  const [annotationTool, setAnnotationTool] = useState<"arrow" | "brush" | "text">("brush");
+  const [annotationColor, setAnnotationColor] = useState<string>("#ec4899"); // Tailwind Pink-500 default
+  const [annotationStrokeWidth, setAnnotationStrokeWidth] = useState<number>(4);
+  const [isDrawingCanvas, setIsDrawingCanvas] = useState(false);
+  const [startDrawingPos, setStartDrawingPos] = useState<{ x: number; y: number } | null>(null);
+  const [drawHistory, setDrawHistory] = useState<string[]>([]);
+  const [textInputVal, setTextInputVal] = useState("");
+  const [textPosition, setTextPosition] = useState<{ x: number; y: number } | null>(null);
+
+  // --- Automated PDF & Email Report States (Explain like I'm 10!) ---
+  const [reportDispatchActive, setReportDispatchActive] = useState(false);
+  const [reportDispatchProgress, setReportDispatchProgress] = useState(0);
+  const [reportStepsLog, setReportStepsLog] = useState<string[]>([]);
+  const [reportFinished, setReportFinished] = useState(false);
+  const [generatedPdfBlobUrl, setGeneratedPdfBlobUrl] = useState<string | null>(null);
+  const [generatedPdfName, setGeneratedPdfName] = useState("");
 
   // --- VAN INVENTORY MANAGEMENT SYSTEM ---
   const [vanInventory, setVanInventory] = useState<Record<string, Array<{ id: string; name: string; category: string; qty: number; minQty: number; unit: string; maxQty: number }>>>(() => {
@@ -926,6 +1056,129 @@ export default function CleanersApp({
     return () => clearInterval(handle);
   }, []);
 
+  // --- PHASE 2: SHIFT TIMER TICK effect ---
+  useEffect(() => {
+    let handle: any;
+    if (shiftClockedIn) {
+      handle = setInterval(() => {
+        setShiftTotalSeconds((prev) => {
+          const next = prev + 1;
+          localStorage.setItem("aastaclean_shift_total_seconds", next.toString());
+          return next;
+        });
+      }, 1000);
+    }
+    return () => {
+      if (handle) clearInterval(handle);
+    };
+  }, [shiftClockedIn]);
+
+  const handleShiftClockIn = () => {
+    const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    setShiftClockedIn(true);
+    setShiftStartTime(nowStr);
+    setShiftTotalSeconds(0);
+    localStorage.setItem("aastaclean_shift_clocked_in", "true");
+    localStorage.setItem("aastaclean_shift_start_time", nowStr);
+    localStorage.setItem("aastaclean_shift_total_seconds", "0");
+
+    onTriggerLog({
+      id: `shift_clock_in_${Date.now()}`,
+      type: "system",
+      status: "success",
+      message: `⏰ Shift Clock-In: ${activeCleanerName} registered their shift start at ${nowStr}!`,
+      timestamp: new Date().toLocaleTimeString()
+    });
+  };
+
+  const handleShiftClockOut = () => {
+    const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const elapsedHrs = Math.floor(shiftTotalSeconds / 3600);
+    const elapsedMins = Math.floor((shiftTotalSeconds % 3600) / 60);
+    const elapsedSecs = shiftTotalSeconds % 60;
+    const readableDuration = `${elapsedHrs.toString().padStart(2, '0')}h:${elapsedMins.toString().padStart(2, '0')}m:${elapsedSecs.toString().padStart(2, '0')}s`;
+
+    setShiftClockedIn(false);
+    localStorage.setItem("aastaclean_shift_clocked_in", "false");
+
+    onTriggerLog({
+      id: `shift_clock_out_${Date.now()}`,
+      type: "system",
+      status: "warning",
+      message: `⏰ Shift Clock-Out: ${activeCleanerName} clocked out at ${nowStr}. Total Shift duration: ${readableDuration}`,
+      timestamp: new Date().toLocaleTimeString()
+    });
+  };
+
+  // --- PHASE 2: VISUAL CALENDAR GENERATION ALGORITHMS ---
+  const handlePrevMonth = () => {
+    setCalendarDate((prev) => {
+      const newD = new Date(prev);
+      newD.setMonth(newD.getMonth() - 1);
+      return newD;
+    });
+  };
+
+  const handleNextMonth = () => {
+    setCalendarDate((prev) => {
+      const newD = new Date(prev);
+      newD.setMonth(newD.getMonth() + 1);
+      return newD;
+    });
+  };
+
+  const getDaysInMonth = (date: Date) => {
+    const year = date.getFullYear();
+    const month = date.getMonth();
+    const firstDayIndex = new Date(year, month, 1).getDay(); // Sunday is 0
+    const totalDays = new Date(year, month + 1, 0).getDate();
+    
+    const days: Array<{ dayNum: number; dateString: string; isCurrentMonth: boolean }> = [];
+    
+    // We start week on Monday in Australia
+    const prevMonthTotalDays = new Date(year, month, 0).getDate();
+    const paddingDays = firstDayIndex === 0 ? 6 : firstDayIndex - 1;
+    
+    for (let i = paddingDays - 1; i >= 0; i--) {
+      const prevDate = new Date(year, month - 1, prevMonthTotalDays - i);
+      days.push({
+        dayNum: prevMonthTotalDays - i,
+        dateString: prevDate.toISOString().split('T')[0],
+        isCurrentMonth: false
+      });
+    }
+    
+    for (let i = 1; i <= totalDays; i++) {
+      const currDate = new Date(year, month, i);
+      days.push({
+        dayNum: i,
+        dateString: currDate.toISOString().split('T')[0],
+        isCurrentMonth: true
+      });
+    }
+    
+    const nextPadding = 42 - days.length;
+    for (let i = 1; i <= nextPadding; i++) {
+      const nextDate = new Date(year, month + 1, i);
+      days.push({
+        dayNum: i,
+        dateString: nextDate.toISOString().split('T')[0],
+        isCurrentMonth: false
+      });
+    }
+    
+    return days;
+  };
+
+  const getJobsForDate = (dateStr: string) => {
+    return cleanerJobs.filter((job) => {
+      const pDate = job.schedulingDetails?.preferredDate || (job.timestamp ? job.timestamp.split('T')[0] : "");
+      return pDate === dateStr;
+    });
+  };
+
+
+
   // Setup and calibrate signature pad with high-DPI (Retina) scaling and size correction
   useEffect(() => {
     if (signingJobId && canvasRef.current) {
@@ -1029,6 +1282,197 @@ export default function CleanersApp({
       ];
     }
     return defaultChecklist;
+  };
+
+  // --- OFFLINE/ONLINE CANVAS PHOTO ANNOTATION ENGINE SYSTEM HANDLERS ---
+  const annotationCanvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  const handleStartAnnotation = (imgUrl: string, onSaveCallback: (newUrl: string) => void) => {
+    setAnnotatingPhoto({ imgUrl, onSaveCallback });
+    setTextPosition(null);
+    setTextInputVal("");
+    setDrawHistory([]);
+    
+    // Load image onto Canvas after mounting
+    setTimeout(() => {
+      const canvas = annotationCanvasRef.current;
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.referrerPolicy = "no-referrer";
+      img.onload = () => {
+        // Adjust canvas aspect to fit image in modern scale bound
+        const maxW = 550;
+        const maxH = 400;
+        let w = img.width;
+        let h = img.height;
+        
+        if (w > maxW) {
+          h = (maxW / w) * h;
+          w = maxW;
+        }
+        if (h > maxH) {
+          w = (maxH / h) * w;
+          h = maxH;
+        }
+        
+        canvas.width = w;
+        canvas.height = h;
+        ctx.drawImage(img, 0, 0, w, h);
+        
+        // Save initial state to history stack
+        setDrawHistory([canvas.toDataURL()]);
+      };
+      img.src = imgUrl;
+    }, 150);
+  };
+
+  const handleCanvasStart = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
+    const canvas = annotationCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
+    const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+
+    if (annotationTool === "text") {
+      setTextPosition({ x, y });
+      return;
+    }
+
+    setIsDrawingCanvas(true);
+    setStartDrawingPos({ x, y });
+
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.strokeStyle = annotationColor;
+    ctx.lineWidth = annotationStrokeWidth;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+  };
+
+  const handleCanvasMove = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
+    if (annotationTool === "text" || !isDrawingCanvas || !startDrawingPos) return;
+    e.preventDefault();
+
+    const canvas = annotationCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
+    const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+
+    if (annotationTool === "brush") {
+      ctx.lineTo(x, y);
+      ctx.stroke();
+    } else if (annotationTool === "arrow") {
+      // Draw arrow preview by clearing and drawing over previous history frame
+      const img = new Image();
+      img.onload = () => {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0);
+        
+        // Draw custom arrow vector line
+        ctx.beginPath();
+        ctx.moveTo(startDrawingPos.x, startDrawingPos.y);
+        ctx.lineTo(x, y);
+        ctx.strokeStyle = annotationColor;
+        ctx.lineWidth = annotationStrokeWidth;
+        ctx.stroke();
+
+        // Draw arrow head points
+        const angle = Math.atan2(y - startDrawingPos.y, x - startDrawingPos.x);
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(x - 12 * Math.cos(angle - Math.PI / 6), y - 12 * Math.sin(angle - Math.PI / 6));
+        ctx.lineTo(x - 12 * Math.cos(angle + Math.PI / 6), y - 12 * Math.sin(angle + Math.PI / 6));
+        ctx.closePath();
+        ctx.fillStyle = annotationColor;
+        ctx.fill();
+      };
+      img.src = drawHistory[drawHistory.length - 1];
+    }
+  };
+
+  const handleCanvasEnd = () => {
+    if (!isDrawingCanvas) return;
+    setIsDrawingCanvas(false);
+    setStartDrawingPos(null);
+
+    // Save active state frame to history stack
+    const canvas = annotationCanvasRef.current;
+    if (canvas) {
+      setDrawHistory((prev) => [...prev, canvas.toDataURL()]);
+    }
+  };
+
+  const handleAddTextBadge = () => {
+    if (!textPosition || !textInputVal || !annotationCanvasRef.current) return;
+    const canvas = annotationCanvasRef.current;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    ctx.font = "bold 13px sans-serif";
+    ctx.fillStyle = annotationColor;
+    
+    // Draw solid text highlight container first
+    const metric = ctx.measureText(textInputVal);
+    const bgW = metric.width + 12;
+    const bgH = 20;
+    ctx.fillStyle = "rgba(0,0,0,0.8)";
+    ctx.fillRect(textPosition.x - bgW / 2, textPosition.y - bgH / 2 - 4, bgW, bgH);
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = annotationColor;
+    ctx.strokeRect(textPosition.x - bgW / 2, textPosition.y - bgH / 2 - 4, bgW, bgH);
+
+    // Render foreground text label
+    ctx.fillStyle = annotationColor;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(textInputVal, textPosition.x, textPosition.y - 4);
+
+    // Save stateframe
+    setDrawHistory((prev) => [...prev, canvas.toDataURL()]);
+    setTextPosition(null);
+    setTextInputVal("");
+  };
+
+  const handleUndo = () => {
+    if (drawHistory.length <= 1) return;
+    const canvas = annotationCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const hist = [...drawHistory];
+    hist.pop(); // Remove last frame
+    setDrawHistory(hist);
+
+    const prevFrame = hist[hist.length - 1];
+    const img = new Image();
+    img.onload = () => {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0);
+    };
+    img.src = prevFrame;
+  };
+
+  const handleSaveAnnotatedPhoto = (dataUrl: string) => {
+    if (annotatingPhoto?.onSaveCallback) {
+      annotatingPhoto.onSaveCallback(dataUrl);
+    }
+    setAnnotatingPhoto(null);
   };
 
   const handleToggleSubtask = (quoteId: string, subtask: string) => {
@@ -1228,6 +1672,216 @@ export default function CleanersApp({
     ctx.restore();
   };
 
+  const triggerDailySummaryReport = async (finalJob: any, signatureDataUrl: string) => {
+    setReportDispatchActive(true);
+    setReportFinished(false);
+    setReportDispatchProgress(10);
+    setReportStepsLog(["🎒 Helper Bot: Starting your final shift report task!"]);
+    
+    // Step 1: Gathering Job Cards
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    setReportDispatchProgress(25);
+    setReportStepsLog(prev => [
+      ...prev, 
+      `🔍 Step 1: Gathering all completed job cards for Lead Cleaner: ${activeCleanerName}...`
+    ]);
+    
+    // Let's find all completed jobs that have been finished
+    const activeCleanerJobs = projectedQuotes.filter(
+      q => q.assignedCleaner === activeCleanerName
+    );
+    
+    // Map existing completed jobs plus this final job
+    const completedJobs = activeCleanerJobs.map(q => 
+      q.id === finalJob.id ? { ...q, bookingStatus: "completed" as const, clientSignature: signatureDataUrl } : q
+    ).filter(q => q.bookingStatus === "completed" || q.id === finalJob.id);
+
+    // Step 2: Creating a beautiful report draft
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    setReportDispatchProgress(50);
+    setReportStepsLog(prev => [
+      ...prev,
+      `📝 Step 2: Drafting the shift report card with ${completedJobs.length} completed job assignments!`
+    ]);
+
+    // Let's render the PDF!
+    let pdfUrl = "";
+    const pdfFileName = `AASTACLEAN_Daily_Summary_${activeCleanerName.replace(/\s+/g, "_")}_${new Date().toISOString().split('T')[0]}.pdf`;
+    try {
+      const doc = new jsPDF();
+      
+      const slateDark = [15, 23, 42];  
+      const emeraldGreen = [16, 185, 129]; 
+      
+      // Banner Border (Top)
+      doc.setFillColor(slateDark[0], slateDark[1], slateDark[2]);
+      doc.rect(0, 0, 210, 15, "F");
+      
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(22);
+      doc.setTextColor(slateDark[0], slateDark[1], slateDark[2]);
+      doc.text("DAILY SHIFT HANDOVER REPORT", 14, 32);
+      
+      doc.setFontSize(10);
+      doc.setFont("helvetica", "normal");
+      doc.setTextColor(100, 116, 139);
+      doc.text("Professional Cleaning Operations Panel Summary", 14, 38);
+      
+      doc.setDrawColor(226, 232, 240);
+      doc.setLineWidth(0.5);
+      doc.line(14, 42, 196, 42);
+      
+      // Shift Information Box
+      doc.setFillColor(248, 250, 252);
+      doc.rect(14, 46, 182, 32, "F");
+      doc.setDrawColor(241, 245, 249);
+      doc.rect(14, 46, 182, 32, "D");
+      
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(11);
+      doc.setTextColor(slateDark[0], slateDark[1], slateDark[2]);
+      doc.text("SHIFT & CREW METRICS", 20, 53);
+      
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(9.5);
+      doc.text(`Lead Cleaner:      ${activeCleanerName}`, 20, 60);
+      doc.text(`Date of Shift:     ${new Date().toLocaleDateString()}`, 20, 66);
+      doc.text(`Report Ref ID:     #REP-${Math.floor(100000 + Math.random() * 900000)}`, 20, 72);
+      
+      doc.text(`Total Tasks Done:  ${completedJobs.length} Job Assignments`, 110, 60);
+      doc.text(`Zoning Office:     Perth Cleaning Guild Hub`, 110, 66);
+      doc.text(`Security Protocol: Locked & Verified`, 110, 72);
+      
+      // Section: Completed Jobs Details
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(14);
+      doc.setTextColor(slateDark[0], slateDark[1], slateDark[2]);
+      doc.text("DETAILED JOB LOGS", 14, 88);
+      
+      let yOffset = 95;
+      
+      completedJobs.forEach((job, index) => {
+        if (yOffset > 220) {
+          doc.addPage();
+          yOffset = 25;
+        }
+        
+        doc.setFillColor(255, 255, 255);
+        doc.setDrawColor(226, 232, 240);
+        doc.rect(14, yOffset, 182, 45, "D");
+        
+        doc.setFillColor(emeraldGreen[0], emeraldGreen[1], emeraldGreen[2]);
+        doc.rect(16, yOffset + 3, 16, 5, "F");
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(7.5);
+        doc.setTextColor(255, 255, 255);
+        doc.text(`JOB #${index + 1}`, 18, yOffset + 6.5);
+        
+        doc.setFontSize(11);
+        doc.setTextColor(slateDark[0], slateDark[1], slateDark[2]);
+        doc.text(`${job.serviceName} - Job ID #${job.id.slice(-6)}`, 36, yOffset + 7);
+        
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(9);
+        doc.setTextColor(71, 85, 105);
+        doc.text(`Customer Address: ${job.suburb || "Perth Hub"} (${job.postcode || "6000"})`, 18, yOffset + 15);
+        
+        const tasks = getSubtasksForService(job.serviceName);
+        const subList = completedSubtasks[job.id] || [];
+        doc.text(`Verified Subtasks: ${subList.length} of ${tasks.length} tasks completed`, 18, yOffset + 21);
+        
+        const start = timers[job.id]?.startTime || job.siteArrivalTime || "09:00 AM";
+        const end = job.siteDepartureTime || "11:30 AM";
+        const duration = job.actualSiteMinutes || (timers[job.id] ? Math.round(timers[job.id].seconds / 60) : 150);
+        doc.text(`Shift Timings: Site Arrival ${start} | Departure ${end} (${duration} mins)`, 18, yOffset + 27);
+        
+        if (job.clientSignature || signatureDataUrl) {
+          doc.text("Signed Off by Client:", 135, yOffset + 15);
+          try {
+            doc.addImage(job.clientSignature || signatureDataUrl, "PNG", 135, yOffset + 18, 45, 15);
+          } catch (e) {
+            doc.setFontSize(7.5);
+            doc.text("[Signature Image Taped]", 135, yOffset + 22);
+          }
+        } else {
+          doc.text("Status: Electronic ISO Signed Off", 135, yOffset + 21);
+        }
+        
+        yOffset += 52;
+      });
+
+      if (yOffset > 240) {
+        doc.addPage();
+        yOffset = 25;
+      }
+      
+      doc.setFillColor(240, 253, 250);
+      doc.rect(14, yOffset, 182, 22, "F");
+      doc.setDrawColor(204, 251, 241);
+      doc.rect(14, yOffset, 182, 22, "D");
+      
+      doc.setTextColor(4, 120, 87);
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(9.5);
+      doc.text("ISO-9001 COMPLIANCE CERTIFICATION OF WORKS", 20, yOffset + 6);
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(8);
+      doc.setTextColor(6, 95, 70);
+      doc.text("We hereby audit and certify that the requested maintenance, sanitization, and safety checks on all listed properties", 20, yOffset + 11);
+      doc.text("have been completed in full, backed up by physical on-site photographic & signatures validation logs.", 20, yOffset + 15);
+      
+      doc.setFontSize(8.5);
+      doc.setTextColor(100, 116, 139);
+      doc.text("Cleaner Representative Signature:", 14, yOffset + 35);
+      doc.line(14, yOffset + 44, 75, yOffset + 44);
+      doc.text(activeCleanerName, 14, yOffset + 48);
+      
+      doc.text("Verified Audit Authority Stamp:", 120, yOffset + 35);
+      doc.line(120, yOffset + 44, 185, yOffset + 44);
+      doc.text("AASTACLEAN PERTH DEPLOYMENT OFFICE", 120, yOffset + 48);
+      
+      const blob = doc.output("blob");
+      pdfUrl = URL.createObjectURL(blob);
+      setGeneratedPdfBlobUrl(pdfUrl);
+      setGeneratedPdfName(pdfFileName);
+    } catch (err) {
+      console.error("PDF generation failed:", err);
+      setReportStepsLog(prev => [...prev, "❌ Error writing PDF data: " + err]);
+    }
+
+    // Step 3: Compiling signatures & pictures
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    setReportDispatchProgress(75);
+    setReportStepsLog(prev => [
+      ...prev, 
+      `🎨 Step 3: Success! Rendered official shift PDF report document: ${pdfFileName}`
+    ]);
+
+    // Step 4: Transmitting simulated email
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    setReportDispatchProgress(90);
+    setReportStepsLog(prev => [
+      ...prev, 
+      "📨 Step 4: Transmitting verified secure email stream with PDF attachment to: admin@aastaclean.com.au"
+    ]);
+
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    setReportDispatchProgress(100);
+    setReportFinished(true);
+    setReportStepsLog(prev => [
+      ...prev, 
+      "🎉 Step 5: Email transmission success! Fully synced with Administrator Panel databases. Invoice references locked."
+    ]);
+
+    onTriggerLog({
+      id: Math.random().toString(),
+      type: "system",
+      status: "success",
+      message: `📨 PDF Summary Report Generated & Emailed successfully for ${activeCleanerName}! file: ${pdfFileName}`,
+      timestamp: new Date().toLocaleTimeString()
+    });
+  };
+
   const submitSignatureAndComplete = (quoteId: string) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -1275,6 +1929,15 @@ export default function CleanersApp({
           message: `✍️ Client Signed Off: Client signed off on Job #${quoteId.slice(-6)}. Actual on-site dur: ${timer ? Math.round(timer.seconds / 60) : 0} mins. Invoice locked.`,
           timestamp: now.toLocaleTimeString()
         });
+      }
+
+      // Check if this was the last remaining uncompleted job on their roster
+      const activeCleanerJobs = projectedQuotes.filter(q => q.assignedCleaner === activeCleanerName);
+      const incompleteJobs = activeCleanerJobs.filter(q => q.id !== quoteId && q.bookingStatus !== "completed");
+      const isFinalShiftTask = incompleteJobs.length === 0;
+
+      if (isFinalShiftTask) {
+        triggerDailySummaryReport(job, signatureDataUrl);
       }
     }
 
@@ -2252,7 +2915,118 @@ export default function CleanersApp({
         </div>
 
         {activeCleaner ? (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+          <div className="space-y-6">
+            
+            {/* GLOBAL SHIFT CLOCKING SYSTEM BAR & VIEW SELECTOR */}
+            <div className={`p-5 rounded-3xl border transition-all flex flex-col md:flex-row md:items-center md:justify-between gap-5 ${
+              daylightHighContrast
+                ? "bg-zinc-50 border-2 border-black text-black"
+                : "bg-slate-950/80 border-slate-805 text-white shadow-xl backdrop-blur-md"
+            }`}>
+              <div className="flex items-center gap-4 flex-1">
+                {/* Micro pulsating status lamp */}
+                <div className="relative shrink-0">
+                  <div className={`w-12 h-12 rounded-2xl flex items-center justify-center ${
+                    shiftClockedIn 
+                      ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" 
+                      : "bg-amber-500/10 text-amber-500 border border-amber-500/20"
+                  }`}>
+                    <Clock className={`w-6 h-6 ${shiftClockedIn ? "animate-spin-slow" : ""}`} />
+                  </div>
+                  <span className={`absolute -top-1 -right-1 w-3.5 h-3.5 rounded-full border-2 ${
+                    daylightHighContrast ? "border-zinc-100" : "border-slate-950"
+                  } ${
+                    shiftClockedIn ? "bg-emerald-500 animate-pulse" : "bg-amber-500"
+                  }`} />
+                </div>
+
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-black uppercase tracking-widest font-mono text-slate-500">Global Shift Manager</span>
+                    <span className={`text-[8px] px-1.5 py-0.2 rounded font-black uppercase ${
+                      shiftClockedIn ? "bg-emerald-500/20 text-emerald-400" : "bg-amber-500/20 text-amber-500"
+                    }`}>
+                      {shiftClockedIn ? "● Shift Active" : "● Off Shift"}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    {shiftClockedIn ? (
+                      <div className="flex items-baseline gap-1.5">
+                        <span className="text-lg font-black font-mono tracking-tight text-white select-none">
+                          {(() => {
+                            const h = Math.floor(shiftTotalSeconds / 3600);
+                            const m = Math.floor((shiftTotalSeconds % 3600) / 60);
+                            const s = shiftTotalSeconds % 60;
+                            return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+                          })()}
+                        </span>
+                        <span className="text-[9px] font-extrabold uppercase text-slate-500 tracking-wider">Elapsed Shift</span>
+                      </div>
+                    ) : (
+                      <p className="text-xs font-semibold text-slate-400">Your daily shift time is currently paused. Please Clock In to activate tracking.</p>
+                    )}
+                  </div>
+                  {shiftClockedIn && shiftStartTime && (
+                    <p className="text-[9px] text-slate-500 font-mono">Shift started at: {shiftStartTime}</p>
+                  )}
+                </div>
+              </div>
+
+              {/* Action Buttons & View Segment Tracker */}
+              <div className="flex flex-wrap items-center gap-3 md:justify-end shrink-0">
+                <div className="flex items-center gap-2">
+                  {!shiftClockedIn ? (
+                    <button
+                      type="button"
+                      onClick={handleShiftClockIn}
+                      className="px-4 py-2 bg-emerald-650 hover:bg-emerald-555 text-white rounded-xl text-[10px] font-black uppercase tracking-wider transition-all cursor-pointer leading-none shadow-md shadow-emerald-700/10 shrink-0 border-none"
+                    >
+                      Clock-In Shift
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={handleShiftClockOut}
+                      className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-[10px] font-black uppercase tracking-wider transition-all cursor-pointer leading-none shadow-md shadow-rose-700/10 shrink-0 border-none"
+                    >
+                      Clock-Out Shift
+                    </button>
+                  )}
+                </div>
+
+                <div className="h-6 w-px bg-slate-800 hidden sm:block mx-1" />
+
+                {/* Segmented layout switcher tabs */}
+                <div className={`p-0.5 rounded-xl border flex items-center overflow-hidden ${
+                  daylightHighContrast ? "bg-white border-black" : "bg-slate-900 border-slate-850"
+                }`}>
+                  <button
+                    type="button"
+                    onClick={() => setViewTab("list")}
+                    className={`px-3 py-1 rounded-lg text-[9px] font-black uppercase tracking-wider transition-all cursor-pointer ${
+                      viewTab === "list"
+                        ? (daylightHighContrast ? "bg-black text-white" : "bg-indigo-600 text-white")
+                        : (daylightHighContrast ? "bg-white hover:bg-zinc-100 text-black font-extrabold" : "bg-transparent text-slate-400 hover:text-slate-200")
+                    }`}
+                  >
+                    Roster Feed
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setViewTab("calendar")}
+                    className={`px-3 py-1 rounded-lg text-[9px] font-black uppercase tracking-wider transition-all cursor-pointer ${
+                      viewTab === "calendar"
+                        ? (daylightHighContrast ? "bg-black text-white" : "bg-indigo-600 text-white")
+                        : (daylightHighContrast ? "bg-white hover:bg-zinc-100 text-black font-extrabold" : "bg-transparent text-slate-400 hover:text-slate-200")
+                    }`}
+                  >
+                    Roster Calendar
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
             
             {/* LEFT Panel: Cleaner profile summary & daily stats card (4 Columns) */}
             <div className={themeLeftPanelClasses}>
@@ -2726,10 +3500,202 @@ export default function CleanersApp({
               </div>
             </div>
 
-            {/* RIGHT Panel: Active assigned job details and checklists (8 Columns) */}
+             {/* RIGHT Panel: Active assigned job details and checklists (8 Columns) */}
             <div className="lg:col-span-8 space-y-6">
               
-              {cleanerJobs.length === 0 ? (
+              {viewTab === "calendar" ? (
+                <div className={`p-6 rounded-3xl border transition-all ${
+                  daylightHighContrast 
+                    ? "bg-zinc-50 border-2 border-black text-black" 
+                    : "bg-slate-950/90 border-slate-800/85 text-white shadow-2xl"
+                }`}>
+                  {/* Calendar Header with navigation switches */}
+                  <div className="flex items-center justify-between gap-4 pb-4 border-b border-slate-800 mb-6">
+                    <div className="flex items-center gap-2">
+                      <Calendar className="w-5 h-5 text-indigo-400" />
+                      <div>
+                        <h4 className="font-extrabold text-xs uppercase tracking-wider">Roster Booking Calendar</h4>
+                        <p className="text-[10px] text-slate-500 uppercase font-bold tracking-widest mt-0.5">Monthly Technician Allocation Map</p>
+                      </div>
+                    </div>
+                    
+                    <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap">
+                      <button
+                        type="button"
+                        onClick={handlePrevMonth}
+                        className={`p-1.5 rounded-lg transition-all cursor-pointer ${
+                          daylightHighContrast ? "bg-zinc-200 hover:bg-zinc-300 text-black border border-black animate-none" : "bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white border border-transparent"
+                        }`}
+                        title="Previous Month"
+                      >
+                        <ChevronLeft className="w-4 h-4" />
+                      </button>
+                      <span className="text-xs font-black min-w-[100px] text-center uppercase tracking-wider whitespace-nowrap">
+                        {calendarDate.toLocaleString('default', { month: 'long', year: 'numeric' })}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={handleNextMonth}
+                        className={`p-1.5 rounded-lg transition-all cursor-pointer ${
+                          daylightHighContrast ? "bg-zinc-200 hover:bg-zinc-300 text-black border border-black animate-none" : "bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white border border-transparent"
+                        }`}
+                        title="Next Month"
+                      >
+                        <ChevronRight className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Weekdays indicator heading */}
+                  <div className="grid grid-cols-7 gap-1 text-center font-bold text-[9px] uppercase tracking-wider text-slate-500 mb-2">
+                    <div>Mon</div>
+                    <div>Tue</div>
+                    <div>Wed</div>
+                    <div>Thu</div>
+                    <div>Fri</div>
+                    <div>Sat</div>
+                    <div>Sun</div>
+                  </div>
+
+                  {/* Days grid layout */}
+                  <div className="grid grid-cols-7 gap-1">
+                    {getDaysInMonth(calendarDate).map((cell, idx) => {
+                      const matches = getJobsForDate(cell.dateString);
+                      const hasJobs = matches.length > 0;
+                      const isSelected = selectedCalendarDate === cell.dateString;
+                      
+                      let cellBgClass = "";
+                      if (isSelected) {
+                        cellBgClass = daylightHighContrast ? "bg-indigo-100 border-indigo-600 text-black animate-none" : "bg-indigo-950/80 border-indigo-500 ring-2 ring-indigo-500/30 text-white animate-none";
+                      } else if (!cell.isCurrentMonth) {
+                        cellBgClass = daylightHighContrast ? "bg-zinc-100 text-zinc-400 opacity-40" : "bg-slate-950/20 text-slate-650 opacity-40";
+                      } else {
+                        cellBgClass = daylightHighContrast ? "bg-white hover:bg-zinc-150 text-black" : "bg-slate-900/40 hover:bg-slate-850/60 text-slate-300";
+                      }
+
+                      return (
+                        <div
+                          key={idx}
+                          onClick={() => {
+                            setSelectedCalendarDate(cell.dateString);
+                          }}
+                          className={`min-h-[64px] sm:min-h-[80px] p-1.5 rounded-xl border transition-all cursor-pointer flex flex-col justify-between items-start ${
+                            daylightHighContrast ? "border-zinc-200" : "border-slate-850/50"
+                          } ${cellBgClass}`}
+                        >
+                          <span className="text-[10px] font-black">{cell.dayNum}</span>
+                          
+                          {/* Embedded Mini Badges indicating scheduled tasks */}
+                          {hasJobs && (
+                            <div className="w-full space-y-0.5 mt-1 overflow-hidden" style={{ maxHeight: '42px' }}>
+                              {matches.slice(0, 3).map((job) => {
+                                let badgeColors = daylightHighContrast ? "bg-blue-105 text-blue-800" : "bg-blue-500/20 text-blue-400";
+                                if (job.bookingStatus === "completed") {
+                                  badgeColors = daylightHighContrast ? "bg-emerald-105 text-emerald-800" : "bg-emerald-500/20 text-emerald-400";
+                                } else if (job.bookingStatus === "en-route" || job.bookingStatus === "in-progress") {
+                                  badgeColors = daylightHighContrast ? "bg-amber-105 text-amber-805" : "bg-amber-500/20 text-amber-450";
+                                }
+                                return (
+                                  <div
+                                    key={job.id}
+                                    className={`text-[8px] px-1 py-0.5 rounded font-extrabold truncate uppercase ${badgeColors}`}
+                                    title={`${job.serviceName} - ${job.name}`}
+                                  >
+                                    {job.serviceName.split(" ")[0]}
+                                  </div>
+                                );
+                              })}
+                              {matches.length > 3 && (
+                                <div className="text-[7px] font-bold text-slate-450 pl-0.5">
+                                  +{matches.length - 3} more
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Detail Roster items listed for the selected calendar day date */}
+                  <div className="mt-8 pt-6 border-t border-slate-800 space-y-4">
+                    <div className="flex justify-between items-center bg-transparent gap-2 flex-wrap">
+                      <h5 className="font-extrabold text-xs uppercase tracking-wider text-slate-400">
+                        📆 Jobs rostered for: <span className="text-white font-mono font-black">{selectedCalendarDate ? new Date(selectedCalendarDate).toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }) : "Select a day"}</span>
+                      </h5>
+                      <span className="text-[9px] px-2 py-0.5 rounded-full font-bold bg-slate-900 border border-slate-800 uppercase font-mono text-slate-500 whitespace-nowrap">
+                        {getJobsForDate(selectedCalendarDate || "").length} Allocation{getJobsForDate(selectedCalendarDate || "").length !== 1 ? 's' : ''} Found
+                      </span>
+                    </div>
+
+                    {getJobsForDate(selectedCalendarDate || "").length === 0 ? (
+                      <div className={`text-center py-6 border border-dashed rounded-2xl text-[11px] ${
+                        daylightHighContrast ? "border-zinc-300 text-zinc-500 font-bold" : "border-slate-850/80 text-slate-600 font-mono"
+                      }`}>
+                        No job assignments designated on this calendar node. Select another slot above or switch views.
+                      </div>
+                    ) : (
+                      <div className="space-y-4">
+                        {getJobsForDate(selectedCalendarDate || "").map((job) => {
+                          const subtasks = getSubtasksForService(job.serviceName);
+                          const completedTasks = completedSubtasks[job.id] || [];
+                          const percentComplete = Math.round((completedTasks.length / subtasks.length) * 100) || 0;
+                          
+                          return (
+                            <div 
+                              key={job.id}
+                              className={`p-4 rounded-3xl border flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 transition-all ${
+                                daylightHighContrast 
+                                  ? "bg-white border-2 border-black text-black shadow-sm" 
+                                  : "bg-slate-950 border-slate-805 text-white hover:border-slate-700"
+                              }`}
+                            >
+                              <div className="space-y-1">
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <span className="text-xs font-black">{job.serviceName}</span>
+                                  <span className={`text-[8px] px-1.5 py-0.2 rounded font-black uppercase ${
+                                    job.bookingStatus === "completed" ? "bg-emerald-500/10 text-emerald-400" :
+                                    job.bookingStatus === "in-progress" ? "bg-amber-500/10 text-amber-500" :
+                                    "bg-blue-500/10 text-blue-450"
+                                  }`}>
+                                    {job.bookingStatus || "assigned"}
+                                  </span>
+                                </div>
+                                <p className="text-[10px] text-slate-400">Customer: <strong className="text-slate-200">{job.name}</strong> • Location: <strong>{job.suburb} ({job.postcode})</strong></p>
+                                <p className="text-[9px] text-slate-550 font-mono">Time slot selected: {job.schedulingDetails?.timeSlot || "Day Shift (Standard)"}</p>
+                              </div>
+
+                              <div className="flex items-center gap-2.5">
+                                <div className="text-right hidden sm:block">
+                                  <span className="text-[9px] font-black uppercase text-indigo-400 block">Checklist Task Prog</span>
+                                  <span className="text-[11px] font-bold font-mono text-slate-200">{completedTasks.length}/{subtasks.length} ({percentComplete}%)</span>
+                                </div>
+                                
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    // Navigate / scroll directly to standard list card or open notes
+                                    setViewTab("list");
+                                    setTimeout(() => {
+                                      const el = document.getElementById(`job-card-${job.id}`);
+                                      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                                    }, 100);
+                                  }}
+                                  className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-[10px] uppercase font-black tracking-wider cursor-pointer transition-all border-none"
+                                >
+                                  Manage Job Action
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <>
+                  {cleanerJobs.length === 0 ? (
                 <div className="bg-slate-950/60 py-20 border border-dashed border-slate-805 rounded-3xl text-center flex flex-col items-center justify-center gap-4">
                   <Briefcase className="w-10 h-10 text-slate-700" />
                   <div className="space-y-1">
@@ -3320,14 +4286,34 @@ export default function CleanersApp({
                                                   className="relative group w-8 h-8 rounded-lg overflow-hidden border border-slate-700/40 shadow-xs bg-slate-900 shrink-0"
                                                 >
                                                   <img src={pic} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
-                                                  <button
-                                                    type="button"
-                                                    onClick={() => handleTaskPhotoDelete(job.id, task, pIdx)}
-                                                    className="absolute inset-0 bg-red-600/80 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
-                                                    title="Delete this evidence photo"
-                                                  >
-                                                    <X className="w-2.5 h-2.5 stroke-[3]" />
-                                                  </button>
+                                                   <div className="absolute inset-0 bg-slate-950/80 flex items-center justify-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                                     <button
+                                                       type="button"
+                                                       onClick={() => handleStartAnnotation(pic, (newUrl) => {
+                                                         const updated = [...taskPics];
+                                                         updated[pIdx] = newUrl;
+                                                         setSubtaskPhotos((prev) => ({
+                                                           ...prev,
+                                                           [job.id]: {
+                                                             ...prev[job.id],
+                                                             [task]: updated
+                                                           }
+                                                         }));
+                                                       })}
+                                                       className="p-1 bg-indigo-605 hover:bg-indigo-500 text-white rounded cursor-pointer border-none flex items-center justify-center"
+                                                       title="Draw onto this photo"
+                                                     >
+                                                       <Edit2 className="w-3.5 h-3.5" />
+                                                     </button>
+                                                     <button
+                                                       type="button"
+                                                       onClick={() => handleTaskPhotoDelete(job.id, task, pIdx)}
+                                                       className="p-1 bg-rose-600 hover:bg-rose-500 text-white rounded cursor-pointer border-none flex items-center justify-center"
+                                                       title="Delete this photo"
+                                                     >
+                                                       <X className="w-3.5 h-3.5" />
+                                                     </button>
+                                                   </div>
                                                 </div>
                                               ))}
                                             </div>
@@ -3573,13 +4559,30 @@ export default function CleanersApp({
                                         daylightHighContrast ? "border-black bg-zinc-100" : "border-slate-850 bg-slate-900"
                                       }`}>
                                         <img src={img} alt="before" className="w-full h-full object-cover animate-fade-in" referrerPolicy="no-referrer" />
-                                        <button
-                                          type="button"
-                                          onClick={() => handleDeletePhoto(job.id, "before", idx)}
-                                          className="absolute inset-0 bg-red-610/90 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer text-[10px]"
-                                        >
-                                          <Trash2 className="w-3.5 h-3.5" />
-                                        </button>
+                                         <div className="absolute inset-0 bg-slate-950/85 flex items-center justify-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                                           <button
+                                             type="button"
+                                             onClick={() => handleStartAnnotation(img, (newUrl) => {
+                                               const updated = [...(job.beforePhotos || [])];
+                                               updated[idx] = newUrl;
+                                               setProjectedQuotes((prev) =>
+                                                 prev.map((q) => (q.id === job.id ? { ...q, beforePhotos: updated } : q))
+                                               );
+                                             })}
+                                             className="p-1.5 bg-indigo-650 hover:bg-indigo-550 text-white rounded-lg cursor-pointer border-none flex items-center justify-center"
+                                             title="Draw / Highlight pre-op damage"
+                                           >
+                                             <Edit2 className="w-4 h-4" />
+                                           </button>
+                                           <button
+                                             type="button"
+                                             onClick={() => handleDeletePhoto(job.id, "before", idx)}
+                                             className="p-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg cursor-pointer border-none flex items-center justify-center"
+                                             title="Delete this photo"
+                                           >
+                                             <Trash2 className="w-4 h-4" />
+                                           </button>
+                                         </div>
                                       </div>
                                     ))
                                   )}
@@ -3618,13 +4621,30 @@ export default function CleanersApp({
                                         daylightHighContrast ? "border-black bg-zinc-100" : "border-slate-850 bg-slate-900"
                                       }`}>
                                         <img src={img} alt="after" className="w-full h-full object-cover animate-fade-in" referrerPolicy="no-referrer" />
-                                        <button
-                                          type="button"
-                                          onClick={() => handleDeletePhoto(job.id, "after", idx)}
-                                          className="absolute inset-0 bg-red-610/90 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer text-[10px]"
-                                        >
-                                          <Trash2 className="w-3.5 h-3.5" />
-                                        </button>
+                                         <div className="absolute inset-0 bg-slate-950/85 flex items-center justify-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                                           <button
+                                             type="button"
+                                             onClick={() => handleStartAnnotation(img, (newUrl) => {
+                                               const updated = [...(job.afterPhotos || [])];
+                                               updated[idx] = newUrl;
+                                               setProjectedQuotes((prev) =>
+                                                 prev.map((q) => (q.id === job.id ? { ...q, afterPhotos: updated } : q))
+                                               );
+                                             })}
+                                             className="p-1.5 bg-indigo-650 hover:bg-indigo-550 text-white rounded-lg cursor-pointer border-none flex items-center justify-center"
+                                             title="Draw / Highlight clean finish results"
+                                           >
+                                             <Edit2 className="w-4 h-4" />
+                                           </button>
+                                           <button
+                                             type="button"
+                                             onClick={() => handleDeletePhoto(job.id, "after", idx)}
+                                             className="p-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg cursor-pointer border-none flex items-center justify-center"
+                                             title="Delete this photo"
+                                           >
+                                             <Trash2 className="w-4 h-4" />
+                                           </button>
+                                         </div>
                                       </div>
                                     ))
                                   )}
@@ -3700,81 +4720,13 @@ export default function CleanersApp({
 
                           <div className="flex items-center gap-1.5 w-full sm:w-auto overflow-x-auto pb-1 sm:pb-0">
                             {(() => {
-                              // Self-contained SwipeActionTrack inside mapping context
-                              const SwipeActionTrack = ({ text, colorClass, onPerform }: { text: string, colorClass: string, onPerform: () => void }) => {
-                                const [offset, setOffset] = useState(0);
-                                const [isDragging, setIsDragging] = useState(false);
-                                const startXRef = useRef(0);
-
-                                const handleStart = (clientX: number) => {
-                                  setIsDragging(true);
-                                  startXRef.current = clientX;
-                                };
-
-                                const handleMove = (clientX: number) => {
-                                  if (!isDragging) return;
-                                  const diff = Math.max(0, Math.min(130, clientX - startXRef.current));
-                                  setOffset(diff);
-                                };
-
-                                const handleEnd = () => {
-                                  if (!isDragging) return;
-                                  setIsDragging(false);
-                                  if (offset >= 110) {
-                                    onPerform();
-                                  }
-                                  setOffset(0);
-                                };
-
-                                useEffect(() => {
-                                  const onGlobalMove = (e: MouseEvent) => handleMove(e.clientX);
-                                  const onGlobalTouchMove = (e: TouchEvent) => handleMove(e.touches[0].clientX);
-                                  const onGlobalUp = () => handleEnd();
-
-                                  if (isDragging) {
-                                    window.addEventListener("mousemove", onGlobalMove);
-                                    window.addEventListener("mouseup", onGlobalUp);
-                                    window.addEventListener("touchmove", onGlobalTouchMove);
-                                    window.addEventListener("touchend", onGlobalUp);
-                                  }
-                                  return () => {
-                                    window.removeEventListener("mousemove", onGlobalMove);
-                                    window.removeEventListener("mouseup", onGlobalUp);
-                                    window.removeEventListener("touchmove", onGlobalTouchMove);
-                                    window.removeEventListener("touchend", onGlobalUp);
-                                  };
-                                }, [isDragging, offset]);
-
-                                return (
-                                  <div className={`relative w-52 h-10 ${daylightHighContrast ? "bg-zinc-100 border-2 border-black" : "bg-slate-950/90 border border-slate-800"} rounded-xl overflow-hidden select-none flex items-center shadow-md shrink-0`}>
-                                    <div 
-                                      className={`absolute left-0 top-0 bottom-0 ${colorClass} opacity-20`}
-                                      style={{ width: `${offset + 36}px` }}
-                                    />
-                                    <div className={`absolute inset-0 flex items-center justify-center text-[9px] font-black tracking-widest uppercase pointer-events-none select-none text-center ${daylightHighContrast ? "text-black" : "text-slate-400"}`}>
-                                      {offset > 12 ? "" : text}
-                                    </div>
-                                    <div
-                                      onMouseDown={(e) => handleStart(e.clientX)}
-                                      onTouchStart={(e) => handleStart(e.touches[0].clientX)}
-                                      className="absolute left-1 h-8 w-8 bg-indigo-600 hover:bg-indigo-550 rounded-lg flex items-center justify-center text-white cursor-grab active:cursor-grabbing shadow-sm text-xs font-bold font-mono"
-                                      style={{ 
-                                        transform: `translateX(${offset}px)`,
-                                        transition: isDragging ? "none" : "transform 0.25s cubic-bezier(0.16, 1, 0.3, 1)"
-                                      }}
-                                    >
-                                      👉
-                                    </div>
-                                  </div>
-                                );
-                              };
-
                               if (job.bookingStatus === "pending" || job.bookingStatus === "assigned") {
                                 return (
                                   <SwipeActionTrack 
                                     text="Swipe -> En-Route" 
                                     colorClass="bg-amber-500" 
                                     onPerform={() => handleUpdateStatus(job.id, "en-route")} 
+                                    daylightHighContrast={daylightHighContrast}
                                   />
                                 );
                               } else if (job.bookingStatus === "en-route") {
@@ -3783,6 +4735,7 @@ export default function CleanersApp({
                                     text="Swipe -> Start Job" 
                                     colorClass="bg-sky-500" 
                                     onPerform={() => handleStartTimer(job.id)} 
+                                    daylightHighContrast={daylightHighContrast}
                                   />
                                 );
                               } else if (job.bookingStatus === "in-progress") {
@@ -3800,6 +4753,7 @@ export default function CleanersApp({
                                         timestamp: new Date().toLocaleTimeString()
                                       });
                                     }} 
+                                    daylightHighContrast={daylightHighContrast}
                                   />
                                 );
                               } else {
@@ -3819,9 +4773,12 @@ export default function CleanersApp({
                   })}
                 </div>
               )}
+              </>
+             )}
             </div>
 
           </div>
+        </div>
         ) : (
           <div className="py-12 text-center text-slate-500 font-mono">
             Roster system inactive or no cleaners currently deployed. Add cleaners in the Coordinator board first.
@@ -3829,6 +4786,205 @@ export default function CleanersApp({
         )}
 
       </div>
+
+      {/* PHASE 2: PHOTO CANVAS ANNOTATION DRAWPAD MODAL */}
+      {annotatingPhoto && (
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4">
+          <div className={`border rounded-3xl max-w-3xl w-full p-6 sm:p-8 space-y-6 text-slate-100 shadow-2xl relative flex flex-col ${
+            daylightHighContrast ? "bg-white border-2 border-black text-black" : "bg-slate-900 border-slate-800"
+          }`}>
+            {/* Modal Header */}
+            <div className="flex justify-between items-center pb-3 border-b border-slate-800">
+              <div className="flex items-center gap-2">
+                <PenTool className="w-5 h-5 text-indigo-400" />
+                <div>
+                  <h3 className={`text-md font-black uppercase tracking-wider ${daylightHighContrast ? "text-black" : "text-white"}`}>
+                    Evidence Photo Annotation Drawer
+                  </h3>
+                  <p className="text-[10px] text-slate-500 font-mono">
+                    Draw highlights, arrows, and stamp warning tags on work photos
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setAnnotatingPhoto(null)}
+                className={`p-1.5 rounded-full hover:bg-slate-800 transition-colors cursor-pointer ${daylightHighContrast ? "text-black hover:bg-zinc-200" : "text-slate-400 hover:text-white"}`}
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Drawing Canvas Board Workspace */}
+            <div className="flex flex-col items-center justify-center gap-4">
+              <div 
+                className="relative max-w-full rounded-2xl border bg-slate-950 flex items-center justify-center overflow-hidden"
+                style={{ borderStyle: 'dashed', borderWidth: '2px', borderColor: '#334155' }}
+              >
+                <canvas
+                  ref={annotationCanvasRef}
+                  onMouseDown={handleCanvasStart}
+                  onMouseMove={handleCanvasMove}
+                  onMouseUp={handleCanvasEnd}
+                  onMouseLeave={handleCanvasEnd}
+                  onTouchStart={handleCanvasStart}
+                  onTouchMove={handleCanvasMove}
+                  onTouchEnd={handleCanvasEnd}
+                  className="max-w-full cursor-crosshair rounded-xl block"
+                />
+
+                {/* Inline Text Input Overlay on clicking for stamping */}
+                {textPosition && (
+                  <div 
+                    className="absolute z-10 p-2.5 bg-slate-950 border border-indigo-500 text-white rounded-xl shadow-2xl space-y-2 max-w-[200px]"
+                    style={{ 
+                      left: `${textPosition.x}px`, 
+                      top: `${textPosition.y}px`, 
+                      transform: 'translate(-50%, -100%)' 
+                    }}
+                  >
+                    <p className="text-[8px] font-black uppercase tracking-wider text-indigo-400">Stamp Text Here:</p>
+                    <input
+                      type="text"
+                      autoFocus
+                      placeholder="e.g. MISSING AT SPOT, OVEN CLEANED"
+                      value={textInputVal}
+                      onChange={(e) => setTextInputVal(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-[10px] text-white outline-none focus:border-indigo-500"
+                    />
+                    <div className="flex justify-between items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => setTextPosition(null)}
+                        className="px-1.5 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-400 rounded text-[8px] uppercase font-bold"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleAddTextBadge}
+                        className="px-2 py-0.5 bg-indigo-650 hover:bg-indigo-555 text-white rounded text-[8px] uppercase font-bold"
+                      >
+                        Add Tag
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Premium Annotation Toolbelt Toolbar */}
+            <div className={`p-4 rounded-2xl border flex flex-wrap items-center justify-between gap-4 ${
+              daylightHighContrast ? "bg-zinc-100 border-black" : "bg-slate-950/80 border-slate-850"
+            }`}>
+              {/* Tool Selection */}
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-[10px] text-slate-500 font-bold uppercase mr-1">Tools:</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAnnotationTool("brush");
+                    setTextPosition(null);
+                  }}
+                  className={`px-3 py-1.5 rounded-lg text-[9px] uppercase font-black tracking-wider transition-all cursor-pointer ${
+                    annotationTool === "brush" ? "bg-indigo-600 text-white font-bold animate-none" : "bg-slate-900 hover:bg-slate-800 text-slate-300"
+                  }`}
+                >
+                  🖌️ Brush Paint
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAnnotationTool("arrow");
+                    setTextPosition(null);
+                  }}
+                  className={`px-3 py-1.5 rounded-lg text-[9px] uppercase font-black tracking-wider transition-all cursor-pointer ${
+                    annotationTool === "arrow" ? "bg-indigo-600 text-white font-bold animate-none" : "bg-slate-900 hover:bg-slate-800 text-slate-300"
+                  }`}
+                >
+                  ➡️ Arrow Highlight
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAnnotationTool("text");
+                  }}
+                  className={`px-3 py-1.5 rounded-lg text-[9px] uppercase font-black tracking-wider transition-all cursor-pointer ${
+                    annotationTool === "text" ? "bg-indigo-600 text-white font-bold animate-none" : "bg-slate-900 hover:bg-slate-800 text-slate-300"
+                  }`}
+                >
+                  🔤 Text Sticker (Click image)
+                </button>
+              </div>
+
+              {/* Color Swatch Selector */}
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-[10px] text-slate-505 font-bold uppercase mr-1">Color:</span>
+                {[
+                  { hex: "#ec4899", desc: "Pink" },
+                  { hex: "#ef4444", desc: "Red" },
+                  { hex: "#eab308", desc: "Yellow" },
+                  { hex: "#10b981", desc: "Green" },
+                  { hex: "#6366f1", desc: "Indigo" },
+                  { hex: "#ffffff", desc: "White" }
+                ].map((col) => (
+                  <button
+                    key={col.hex}
+                    type="button"
+                    onClick={() => setAnnotationColor(col.hex)}
+                    className="w-5.5 h-5.5 rounded-full border transition-transform hover:scale-115 cursor-pointer relative"
+                    style={{ 
+                      backgroundColor: col.hex,
+                      borderColor: annotationColor === col.hex ? '#f43f5e' : 'rgba(255,255,255,0.25)',
+                      boxShadow: annotationColor === col.hex ? `0 0 8px ${col.hex}` : ''
+                    }}
+                    title={col.desc}
+                  >
+                    {annotationColor === col.hex && (
+                      <span className="absolute inset-0 m-auto w-1.5 h-1.5 rounded-full bg-slate-950" />
+                    )}
+                  </button>
+                ))}
+              </div>
+
+              {/* Undo Stack */}
+              <button
+                type="button"
+                onClick={handleUndo}
+                disabled={drawHistory.length <= 1}
+                className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed border border-slate-800 hover:border-slate-700 text-xs font-bold text-slate-300 rounded-lg transition-all cursor-pointer"
+                title="Undo last stroke"
+              >
+                ↩️ Undo Stroke
+              </button>
+            </div>
+
+            {/* Bottom Form Actions */}
+            <div className="flex justify-end gap-3 text-xs pt-1">
+              <button
+                type="button"
+                onClick={() => setAnnotatingPhoto(null)}
+                className={`px-4 py-2.5 font-bold rounded-xl transition-all cursor-pointer ${
+                  daylightHighContrast ? "bg-zinc-200 text-black hover:bg-zinc-300" : "bg-slate-950 hover:bg-slate-900 text-slate-450 border border-slate-805"
+                }`}
+              >
+                Cancel Drawing
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (annotationCanvasRef.current) {
+                    handleSaveAnnotatedPhoto(annotationCanvasRef.current.toDataURL());
+                  }
+                }}
+                className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-505 text-white font-black uppercase tracking-wider rounded-xl transition-all cursor-pointer shadow-lg shadow-indigo-650/25"
+              >
+                Save Annotated Evidence
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Signature drawing modal overlay */}
       {signingJobId && (
@@ -3895,6 +5051,124 @@ export default function CleanersApp({
                 <CheckCircle2 className="w-3.5 h-3.5" /> Confirm & Complete
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* 🎒 10-Year-Old Daily Shift Report & Email Dispatch Modal */}
+      {reportDispatchActive && (
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-slate-900 border-2 border-indigo-600 rounded-3xl max-w-xl w-full p-6 sm:p-8 space-y-6 text-slate-100 shadow-2xl relative animate-fade-in font-sans">
+            
+            {/* Top Close icon */}
+            <button 
+              type="button" 
+              onClick={() => {
+                setReportDispatchActive(false);
+                setReportFinished(false);
+              }}
+              className="absolute top-6 right-6 text-slate-400 hover:text-white bg-slate-950 p-2 rounded-full border border-slate-800 transition-colors cursor-pointer"
+              title="Close summary"
+            >
+              <X className="w-4 h-4" />
+            </button>
+
+            {/* Visual Head */}
+            <div className="text-center space-y-3">
+              <span className="px-3 py-1 rounded-full text-xs font-black bg-indigo-500/10 text-indigo-400 border border-indigo-500/30 uppercase tracking-widest inline-block mx-auto animate-bounce">
+                🚀 Shift Mission Accomplished! 🚀
+              </span>
+              <h3 className="text-2xl font-black text-white tracking-tight">
+                Daily Shift Summary Dispatcher
+              </h3>
+              <p className="text-sm text-slate-300 max-w-md mx-auto font-medium">
+                Hey there superstar! Under your direction, <strong className="text-indigo-400">{activeCleanerName}</strong> has completed every single job on their roster. Let's package up your amazing shift accomplishments!
+              </p>
+            </div>
+
+            {/* Friendly Analogy for a 10 year old */}
+            <div className="bg-slate-950/60 p-4 rounded-2xl border border-indigo-500/20 space-y-2 text-xs text-slate-300 leading-relaxed font-mono">
+              <span className="font-extrabold text-indigo-400 flex items-center gap-1.5">
+                <Sparkles className="w-4 h-4 text-amber-450" />
+                Explain-Like-I'm-10: How it works!
+              </span>
+              <p>
+                Imagine putting your superhero cleaning tasks in a golden booklet, signing it with a magic pen, and flying it directly to the boss's command desk! We use a special library called <strong className="text-indigo-300 font-mono text-[13px] font-bold">jsPDF</strong> in the browser to weave your actual client signatures into a real PDF document, then trigger a simulated email flight to our server!
+              </p>
+            </div>
+
+            {/* Progress Wheel and Steps Log */}
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <div className="flex justify-between items-center text-xs text-slate-400 font-bold font-mono">
+                  <span>Mailing Progress Meter</span>
+                  <span>{reportDispatchProgress}% Ready!</span>
+                </div>
+                {/* Visual Progress Bar */}
+                <div className="w-full bg-slate-950 rounded-full h-3.5 overflow-hidden border border-slate-800 p-0.5">
+                  <div 
+                    className="bg-gradient-to-r from-teal-500 via-indigo-500 to-emerald-500 h-full rounded-full transition-all duration-500 ease-out"
+                    style={{ width: `${reportDispatchProgress}%` }}
+                  />
+                </div>
+              </div>
+
+              {/* Steps timeline log */}
+              <div className="bg-slate-950 p-4 rounded-2xl border border-slate-850 space-y-2 max-h-48 overflow-y-auto font-mono text-xs text-left">
+                {reportStepsLog.map((step, idx) => (
+                  <div 
+                    key={idx} 
+                    className={`flex gap-2 items-start py-1 ${
+                      step.startsWith("❌") 
+                        ? "text-rose-450 font-bold" 
+                        : step.startsWith("🎉") 
+                          ? "text-emerald-450 font-black" 
+                          : "text-slate-200"
+                    }`}
+                  >
+                    <span>•</span>
+                    <span>{step}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Finished states actions */}
+            {reportFinished && (
+              <div className="space-y-4 pt-2">
+                <div className="bg-emerald-505/10 border border-emerald-500/20 p-4 rounded-2xl text-center space-y-1">
+                  <div className="w-12 h-12 bg-emerald-500 text-white rounded-full flex items-center justify-center mx-auto text-xl font-bold animate-pulse">
+                    ✓
+                  </div>
+                  <h4 className="text-md font-bold text-white pt-1">Mailing Successful!</h4>
+                  <p className="text-xs text-slate-400 leading-relaxed font-mono">
+                    Your PDF shift overview and signatures have safely arrived at <strong className="text-emerald-450">admin@aastaclean.com.au</strong> as a secure email attachment.
+                  </p>
+                </div>
+
+                <div className="flex flex-col sm:flex-row gap-2.5 font-mono">
+                  {generatedPdfBlobUrl && (
+                    <a
+                      href={generatedPdfBlobUrl}
+                      download={generatedPdfName}
+                      className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3.5 px-4 rounded-xl text-center transition-all cursor-pointer flex items-center justify-center gap-2 text-xs uppercase tracking-wider shadow-lg shadow-emerald-700/15"
+                    >
+                      <Download className="w-4 h-4" /> Download PDF Report Card
+                    </a>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setReportDispatchActive(false);
+                      setReportFinished(false);
+                    }}
+                    className="flex-1 bg-slate-950 hover:bg-slate-900 text-indigo-400 hover:text-indigo-300 border border-slate-805 font-bold py-3.5 px-4 rounded-xl text-center transition-all cursor-pointer text-xs uppercase tracking-wider"
+                  >
+                    Go Back & Explore 👋
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

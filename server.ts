@@ -17,6 +17,98 @@ async function startServer() {
     res.json({ status: "ok" });
   });
 
+  // Dynamic Gemini Enterprise Code Review Agent
+  app.post("/api/v1/gemini/review", async (req, res) => {
+    const geminiKey = process.env.GEMINI_API_KEY;
+    if (!geminiKey) {
+      return res.status(200).json({
+        success: false,
+        error: "Missing API Key",
+        report: `### ❌ GEMINI SERVICE SUSPENDED
+- **Error**: \`GEMINI_API_KEY\` is not registered.
+- **Remediation**: Please register your API key in **Settings > Secrets** in the workspace. Once set, the Gemini Code Review Agent connects automatically to perform active audits.
+
+### 📝 Default Code Review Guidelines & Checkpoints
+Since the live model connection requires an API configuration, here is our Australian Cleanliness & Silica-handling standards criteria checklist:
+1. **Accredited Roster Integrities**: WWCC validation hooks must run in a background queue context before shift matching.
+2. **Signature Canvas Density**: Calibrate signature pads for High-DPI screens specifically (standardise using coordinate factor division).
+3. **Double-State Updates**: Never declare components inline inside map callbacks to prevent un-mounting React issues.`
+      });
+    }
+
+    try {
+      const fs = await import("fs/promises");
+      const { GoogleGenAI } = await import("@google/genai");
+      const ai = new GoogleGenAI({ apiKey: geminiKey });
+
+      // Read core app file and helper server file
+      let cleanersAppContent = "";
+      let serverFileContent = "";
+
+      try {
+        cleanersAppContent = await fs.readFile(path.join(process.cwd(), "src/components/CleanersApp.tsx"), "utf8");
+      } catch (e) {
+        cleanersAppContent = "// CleanersApp.tsx not found or unreadable";
+      }
+
+      try {
+        serverFileContent = await fs.readFile(path.join(process.cwd(), "server.ts"), "utf8");
+      } catch (e) {
+        serverFileContent = "// server.ts not found or unreadable";
+      }
+
+      // Take first parts to guarantee context boundaries fit inside standard chunk limits
+      const chunkApp = cleanersAppContent.slice(0, 32000);
+      const chunkServer = serverFileContent.slice(0, 16000);
+
+      const response = await ai.models.generateContent({
+        model: "gemini-3.5-flash",
+        contents: [
+          {
+            role: "user",
+            parts: [{
+              text: `You are Hermes, the senior AI Architect presiding over AASTACLEAN's professional Perth cleaning and bio-restoration engine.
+Perform a strict code audit against our custom hybrid (offline/online) codebase.
+
+Here are the code fragments to evaluate:
+
+--- FILE: CleanersApp.tsx (Excerpt) ---
+${chunkApp}
+
+--- FILE: server.ts (Excerpt) ---
+${chunkServer}
+
+--- COMPLIANCE OBJECTIVE ---
+Prepare a comprehensive, constructive developer review. Focus heavily on:
+1. React Hook stability (avoiding re-renders, correct dependency arrays, standalone component lifecycles).
+2. Canvas Signature high-DPI scaling validation.
+3. Queue systems and background worker robustness.
+4. UI/UX styling alignment with daylight-saving high contrast and dark modes.
+
+Write the entire audit as clean Markdown paragraphs with bold headings. Be professional, highly constructive, objective, and use Australian-flavored phrasing.`
+            }]
+          }
+        ]
+      });
+
+      return res.status(200).json({
+        success: true,
+        report: response.text || "Code review successfully compiled by Hermes."
+      });
+    } catch (error: any) {
+      return res.status(500).json({
+        success: false,
+        error: "Execution Failure",
+        report: `### ⚠️ Gemini Agent Pipeline Interruption
+An error occurred while calling the Gemini model or parsing target directories:
+\`\`\`
+${error.message || error}
+\`\`\`
+Please ensure package imports and network bindings are fully synchronized.`
+      });
+    }
+  });
+
   // Background Queue stats & log visualization endpoints
   app.get("/api/v1/queue/stats", (req, res) => {
     res.json(getQueueStats());

@@ -284,6 +284,70 @@ export default function DeveloperSuite({
 
   const processHermesCommand = (command: string) => {
     const trimmed = command.trim();
+
+    // 0. Intercept the Gemini Code Review Agent execution
+    if (trimmed.startsWith("/code-review") || trimmed.toLowerCase().includes("code-review") || trimmed.toLowerCase().includes("code review")) {
+      setIsTyping(true);
+      
+      onTriggerLog({
+        id: `gemini_review_start_${Date.now()}`,
+        type: "system",
+        status: "info",
+        message: `🤖 [Gemini Audit] Deploying Code Review Agent against CleanersApp.tsx and server.ts`,
+        timestamp: new Date().toLocaleTimeString(),
+      });
+
+      fetch("/api/v1/gemini/review", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" }
+      })
+      .then(res => res.json())
+      .then(data => {
+        setIsTyping(false);
+        if (data.success) {
+          addHermesMessage(
+            `🛡️ **GEMINI CODE REVIEW REPORT GENERATED:**\n\n` +
+            data.report
+          );
+          onTriggerLog({
+            id: `gemini_review_success_${Date.now()}`,
+            type: "system",
+            status: "success",
+            message: `✅ [Gemini Audit] Code review completed successfully.`,
+            timestamp: new Date().toLocaleTimeString(),
+          });
+        } else {
+          addHermesMessage(
+            `⚠️ **GEMINI CODE REVIEW SERVICE ADVISOR:**\n\n` +
+            data.report
+          );
+          onTriggerLog({
+            id: `gemini_review_no_key_${Date.now()}`,
+            type: "system",
+            status: "warning",
+            message: `⚠️ [Gemini Audit] API Key missing or inactive. Dispatched fallback guidelines.`,
+            timestamp: new Date().toLocaleTimeString(),
+          });
+        }
+      })
+      .catch(err => {
+        setIsTyping(false);
+        addHermesMessage(
+          `❌ **GEMINI AUDITOR CONNECTION ERROR:**\n\n` +
+          `Failed to reach the server review endpoint: \`${err.message || err}\`\n` +
+          `Please ensure the administrative container is active and compiling.`
+        );
+        onTriggerLog({
+          id: `gemini_review_err_${Date.now()}`,
+          type: "system",
+          status: "error",
+          message: `❌ [Gemini Audit] Connection error during code review request: ${err.message}`,
+          timestamp: new Date().toLocaleTimeString(),
+        });
+      });
+      return;
+    }
+
     setIsTyping(true);
 
     // Simulate Network Roundtrip Latency for NLAH Execution Daemon
@@ -342,6 +406,7 @@ export default function DeveloperSuite({
       if (trimmed.startsWith("/help") || trimmed.toLowerCase().includes("help")) {
         addHermesMessage(
           `📚 **Available Commands in NLAH Directory:**\n` +
+          `• \`/code-review\` — Deploy active Gemini Code Review Agent to scan codebase and list suggestions\n` +
           `• \`/webhook <url>\` — Dynamically re-wire CRM Ingest url endpoint\n` +
           `• \`/status\` — Execute comprehensive high-assurance infrastructure diagnostics\n` +
           `• \`/multiply postcode:<pc> multi:<val>\` — Push custom regional pricing surcharges\n` +
@@ -952,6 +1017,11 @@ export default function DeveloperSuite({
                   {/* Preset Blocks */}
                   <div className="space-y-3 max-h-[260px] overflow-y-auto pr-1">
                     {[
+                      { 
+                        title: "🛡️ Deploy Gemini Code Review", 
+                        command: "/code-review", 
+                        desc: "Run active AI audit across files and generate compliance recommendations." 
+                      },
                       { 
                         title: "🔍 Check Health & Status", 
                         command: "/status", 
